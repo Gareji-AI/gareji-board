@@ -554,6 +554,71 @@ pub struct AgentProfileSaveReceipt {
     pub changed: bool,
 }
 
+/// The Board-owned kind of one selected Execution workspace connection.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ExecutionWorkspaceKind {
+    BundledSample,
+    LocalDirectory,
+}
+
+impl ExecutionWorkspaceKind {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::BundledSample => "bundled_sample",
+            Self::LocalDirectory => "local_directory",
+        }
+    }
+}
+
+impl TryFrom<&str> for ExecutionWorkspaceKind {
+    type Error = UnknownExecutionWorkspaceKind;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "bundled_sample" => Ok(Self::BundledSample),
+            "local_directory" => Ok(Self::LocalDirectory),
+            _ => Err(UnknownExecutionWorkspaceKind),
+        }
+    }
+}
+
+/// Stored Execution workspace kind violated the Board vocabulary.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct UnknownExecutionWorkspaceKind;
+
+impl fmt::Display for UnknownExecutionWorkspaceKind {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("unknown Execution workspace kind")
+    }
+}
+
+impl std::error::Error for UnknownExecutionWorkspaceKind {}
+
+/// Local Board configuration that selects an Execution workspace for one project.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExecutionWorkspaceConnection {
+    pub project_id: String,
+    pub kind: ExecutionWorkspaceKind,
+    /// Canonical local directory path for a local connection; absent for the bundled sample.
+    pub location: Option<String>,
+}
+
+/// Explicit human intent to replace one project's selected Execution workspace.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExecutionWorkspaceSaveRequest {
+    pub expected: Option<ExecutionWorkspaceConnection>,
+    pub target: ExecutionWorkspaceConnection,
+}
+
+/// Durable result of one Execution workspace connection save attempt.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExecutionWorkspaceSaveReceipt {
+    pub previous: Option<ExecutionWorkspaceConnection>,
+    pub resulting: ExecutionWorkspaceConnection,
+    pub changed: bool,
+}
+
 /// Board-owned scheduling intent for one Work item.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct AgentPlan {

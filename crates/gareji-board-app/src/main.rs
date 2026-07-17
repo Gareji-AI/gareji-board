@@ -8,18 +8,22 @@ use gareji_board_domain::{
     AgentProfileSaveReceipt, AgentProfileSaveRequest, AgentProfileSummary, ApprovalRequirement,
     AttachmentReceipt, AttachmentRequest, AttachmentTarget, AutopilotStopReason,
     CandidateSkipReason, CheckpointDeliveryStatus, CheckpointOutcome, CheckpointReconciliation,
-    NoCandidateReason, PortfolioSnapshot, ProgressActivity, ProjectHealth, ReconciliationDecision,
-    ReconciliationReceipt, ReconciliationRequest, SafeAutopilotOutcome, SafeAutopilotPreview,
-    WorkItemState, WorkItemSummary, WorkItemTransitionReceipt, WorkItemTransitionRequest,
+    ExecutionWorkspaceConnection, ExecutionWorkspaceKind, ExecutionWorkspaceSaveReceipt,
+    ExecutionWorkspaceSaveRequest, NoCandidateReason, PortfolioSnapshot, ProgressActivity,
+    ProjectHealth, ReconciliationDecision, ReconciliationReceipt, ReconciliationRequest,
+    SafeAutopilotOutcome, SafeAutopilotPreview, WorkItemState, WorkItemSummary,
+    WorkItemTransitionReceipt, WorkItemTransitionRequest,
 };
 use gareji_board_store::{SqliteBoardStore, default_board_database_path};
 
 mod agent_behavior;
+mod execution_workspace;
 
 use agent_behavior::{
     AgentBehaviorInspection, AgentBehaviorInspector, BehaviorInspectionStatus, ReferenceInspection,
     ReferenceStatus,
 };
+use execution_workspace::ExecutionWorkspaceConnector;
 
 const APP_CSS: &str = include_str!("style.css");
 const PREVIEW_GLOBAL_CONCURRENCY_CAP: u32 = 2;
@@ -42,6 +46,7 @@ struct AppState {
     portfolio: PortfolioSnapshot,
     work_items: Vec<WorkItemSummary>,
     agent_profiles: Vec<AgentProfileSummary>,
+    execution_workspaces: Vec<ExecutionWorkspaceConnection>,
     activity: ActivityTimeline,
     storage_label: String,
     warning: Option<String>,
@@ -51,6 +56,7 @@ struct AppState {
     transition_notice: Option<String>,
     agent_plan_notice: Option<String>,
     agent_profile_notice: Option<String>,
+    execution_workspace_notice: Option<String>,
     autopilot_preview: Option<SafeAutopilotPreview>,
 }
 
@@ -81,11 +87,18 @@ fn load_app_state() -> AppState {
         let portfolio = store.load_portfolio()?;
         let work_items = store.load_work_items()?;
         let agent_profiles = store.load_agent_profiles()?;
-        Ok((store, portfolio, work_items, agent_profiles))
+        let execution_workspaces = store.load_execution_workspaces()?;
+        Ok((
+            store,
+            portfolio,
+            work_items,
+            agent_profiles,
+            execution_workspaces,
+        ))
     });
 
     match loaded {
-        Ok((store, portfolio, work_items, agent_profiles)) => {
+        Ok((store, portfolio, work_items, agent_profiles, execution_workspaces)) => {
             let project_ids = portfolio
                 .projects
                 .iter()
@@ -112,6 +125,7 @@ fn load_app_state() -> AppState {
                 portfolio,
                 work_items,
                 agent_profiles,
+                execution_workspaces,
                 activity,
                 storage_label,
                 warning: None,
@@ -121,6 +135,7 @@ fn load_app_state() -> AppState {
                 transition_notice: None,
                 agent_plan_notice: None,
                 agent_profile_notice: None,
+                execution_workspace_notice: None,
                 autopilot_preview: None,
             }
         }
@@ -128,6 +143,7 @@ fn load_app_state() -> AppState {
             portfolio: PortfolioSnapshot::default(),
             work_items: Vec::new(),
             agent_profiles: Vec::new(),
+            execution_workspaces: Vec::new(),
             activity: ActivityTimeline::default(),
             storage_label,
             warning: Some(error.to_string()),
@@ -137,6 +153,7 @@ fn load_app_state() -> AppState {
             transition_notice: None,
             agent_plan_notice: None,
             agent_profile_notice: None,
+            execution_workspace_notice: None,
             autopilot_preview: None,
         },
     }
@@ -179,6 +196,14 @@ fn save_agent_profile(
 ) -> Result<AgentProfileSaveReceipt, String> {
     SqliteBoardStore::open(board_database_path())
         .and_then(|mut store| store.save_agent_profile(request))
+        .map_err(|error| error.to_string())
+}
+
+fn save_execution_workspace(
+    request: &ExecutionWorkspaceSaveRequest,
+) -> Result<ExecutionWorkspaceSaveReceipt, String> {
+    SqliteBoardStore::open(board_database_path())
+        .and_then(|mut store| store.save_execution_workspace(request))
         .map_err(|error| error.to_string())
 }
 
@@ -248,6 +273,33 @@ fn handle_agent_profile(
     }
 }
 
+fn handle_execution_workspace(
+    mut state: Signal<AppState>,
+    request: &ExecutionWorkspaceSaveRequest,
+) {
+    match save_execution_workspace(request) {
+        Ok(receipt) => {
+            let mut reloaded = load_app_state();
+            reloaded.execution_workspace_notice = Some(execution_workspace_message(&receipt));
+            state.set(reloaded);
+        }
+        Err(error) => state.write().execution_workspace_notice = Some(error),
+    }
+}
+
+fn handle_execution_workspace_connection(
+    mut state: Signal<AppState>,
+    request: (String, Option<ExecutionWorkspaceConnection>, String),
+) {
+    let (project_id, expected, location) = request;
+    match ExecutionWorkspaceConnector::connect_local_directory(&project_id, &location) {
+        Ok(target) => {
+            handle_execution_workspace(state, &ExecutionWorkspaceSaveRequest { expected, target });
+        }
+        Err(error) => state.write().execution_workspace_notice = Some(error),
+    }
+}
+
 #[allow(non_snake_case)]
 fn App() -> Element {
     let mut state = use_signal(load_app_state);
@@ -273,6 +325,10 @@ fn App() -> Element {
     let on_transition = move |request| handle_transition(state, &request);
     let on_agent_plan = move |request| handle_agent_plan(state, &request);
     let on_agent_profile = move |request| handle_agent_profile(state, new_profile_form, &request);
+    let on_execution_workspace = move |(project_id, expected, location)| {
+        handle_execution_workspace_connection(state, (project_id, expected, location));
+    };
+    let action_notices = action_notices(&snapshot);
 
     rsx! {
         document::Title { "Gareji Board" }
@@ -303,25 +359,7 @@ fn App() -> Element {
                 aside { class: "warning", "Local data could not be loaded: {warning}" }
             }
 
-            if let Some(notice) = &snapshot.reconciliation_notice {
-                aside { class: "action-notice", "{notice}" }
-            }
-
-            if let Some(notice) = &snapshot.attachment_notice {
-                aside { class: "action-notice", "{notice}" }
-            }
-
-            if let Some(notice) = &snapshot.transition_notice {
-                aside { class: "action-notice", "{notice}" }
-            }
-
-            if let Some(notice) = &snapshot.agent_plan_notice {
-                aside { class: "action-notice", "{notice}" }
-            }
-
-            if let Some(notice) = &snapshot.agent_profile_notice {
-                aside { class: "action-notice", "{notice}" }
-            }
+            ActionNotices { notices: action_notices }
 
             ActivityInbox {
                 activity: snapshot.activity.clone(),
@@ -338,6 +376,8 @@ fn App() -> Element {
             AgentProfileCatalog {
                 agent_profiles: snapshot.agent_profiles.clone(),
                 work_items: snapshot.work_items.clone(),
+                portfolio: snapshot.portfolio.clone(),
+                execution_workspaces: snapshot.execution_workspaces.clone(),
                 new_profile_id: new_profile_form.profile_id,
                 new_profile_role: new_profile_form.role,
                 new_profile_capabilities: new_profile_form.capabilities,
@@ -353,7 +393,11 @@ fn App() -> Element {
                 on_agent_plan,
             }
 
-            ProjectGrid { portfolio: snapshot.portfolio.clone() }
+            ProjectGrid {
+                portfolio: snapshot.portfolio.clone(),
+                execution_workspaces: snapshot.execution_workspaces.clone(),
+                on_connect: on_execution_workspace,
+            }
 
             footer { class: "app-footer",
                 span { "Local data" }
@@ -361,6 +405,29 @@ fn App() -> Element {
             }
         }
     }
+}
+
+#[component]
+fn ActionNotices(notices: Vec<String>) -> Element {
+    rsx! {
+        for notice in notices {
+            aside { class: "action-notice", "{notice}" }
+        }
+    }
+}
+
+fn action_notices(snapshot: &AppState) -> Vec<String> {
+    [
+        snapshot.reconciliation_notice.clone(),
+        snapshot.attachment_notice.clone(),
+        snapshot.transition_notice.clone(),
+        snapshot.agent_plan_notice.clone(),
+        snapshot.agent_profile_notice.clone(),
+        snapshot.execution_workspace_notice.clone(),
+    ]
+    .into_iter()
+    .flatten()
+    .collect()
 }
 
 #[component]
@@ -744,6 +811,8 @@ fn reconciliation_class(decision: ReconciliationDecision) -> &'static str {
 fn AgentProfileCatalog(
     agent_profiles: Vec<AgentProfileSummary>,
     work_items: Vec<WorkItemSummary>,
+    portfolio: PortfolioSnapshot,
+    execution_workspaces: Vec<ExecutionWorkspaceConnection>,
     new_profile_id: Signal<String>,
     new_profile_role: Signal<String>,
     new_profile_capabilities: Signal<String>,
@@ -754,7 +823,33 @@ fn AgentProfileCatalog(
     let profile_count = agent_profiles.len();
     let capability_catalog = agent_capability_catalog(&agent_profiles, &work_items);
     let capability_catalog_label = capability_catalog.join(", ");
-    let behavior_inspector = AgentBehaviorInspector::from_environment();
+    let first_project_id = portfolio
+        .projects
+        .first()
+        .map(|project| project.id.clone())
+        .unwrap_or_default();
+    let mut inspection_project_id = use_signal(move || first_project_id);
+    let selected_project_id = inspection_project_id.read().clone();
+    let selected_project_name = portfolio
+        .projects
+        .iter()
+        .find(|project| project.id == selected_project_id)
+        .map_or("Unknown project", |project| project.name.as_str());
+    let selected_connection = execution_workspaces
+        .iter()
+        .find(|connection| connection.project_id == selected_project_id);
+    let behavior_inspector =
+        selected_connection.map_or_else(AgentBehaviorInspector::unavailable, |connection| {
+            match (connection.kind, connection.location.as_deref()) {
+                (ExecutionWorkspaceKind::BundledSample, None) => {
+                    AgentBehaviorInspector::bundled_sample()
+                }
+                (ExecutionWorkspaceKind::LocalDirectory, Some(location)) => {
+                    AgentBehaviorInspector::for_workspace(std::path::Path::new(location))
+                }
+                _ => AgentBehaviorInspector::unavailable(),
+            }
+        });
     let behavior_source_label = behavior_inspector.label();
     rsx! {
         section { class: "section-heading",
@@ -766,9 +861,21 @@ fn AgentProfileCatalog(
         }
         section { class: "agent-catalog", aria_label: "Agent profile catalog",
             div { class: "behavior-inspection-source",
-                span { "Reference workspace" }
+                label { class: "inspection-project-picker",
+                    span { "Reference project" }
+                    select {
+                        aria_label: "Reference inspection project",
+                        value: "{selected_project_id}",
+                        onchange: move |event| inspection_project_id.set(event.value()),
+                        for project in &portfolio.projects {
+                            option { value: "{project.id}", "{project.name}" }
+                        }
+                    }
+                }
                 strong { "{behavior_source_label}" }
-                small { "Presence check only; trust and Runner preflight remain separate." }
+                small {
+                    "{selected_project_name} · Presence check only; trust and Runner preflight remain separate."
+                }
             }
             NewAgentProfileForm {
                 existing_profiles: agent_profiles.clone(),
@@ -1866,6 +1973,35 @@ fn agent_profile_message(receipt: &AgentProfileSaveReceipt) -> String {
     )
 }
 
+fn execution_workspace_message(receipt: &ExecutionWorkspaceSaveReceipt) -> String {
+    if !receipt.changed {
+        return format!(
+            "{} was already connected to this Execution workspace.",
+            receipt.resulting.project_id
+        );
+    }
+    format!(
+        "{} now uses {} for behavior reference checks.",
+        receipt.resulting.project_id,
+        execution_workspace_label(Some(&receipt.resulting))
+    )
+}
+
+fn execution_workspace_label(connection: Option<&ExecutionWorkspaceConnection>) -> String {
+    match connection {
+        Some(ExecutionWorkspaceConnection {
+            kind: ExecutionWorkspaceKind::BundledSample,
+            ..
+        }) => "Bundled sample".to_owned(),
+        Some(ExecutionWorkspaceConnection {
+            kind: ExecutionWorkspaceKind::LocalDirectory,
+            location: Some(location),
+            ..
+        }) => format!("Local directory · {location}"),
+        _ => "Not connected".to_owned(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2020,7 +2156,11 @@ mod tests {
 }
 
 #[component]
-fn ProjectGrid(portfolio: PortfolioSnapshot) -> Element {
+fn ProjectGrid(
+    portfolio: PortfolioSnapshot,
+    execution_workspaces: Vec<ExecutionWorkspaceConnection>,
+    on_connect: EventHandler<(String, Option<ExecutionWorkspaceConnection>, String)>,
+) -> Element {
     let project_count = portfolio.projects.len();
     rsx! {
         section { class: "section-heading",
@@ -2033,25 +2173,83 @@ fn ProjectGrid(portfolio: PortfolioSnapshot) -> Element {
 
         section { class: "project-grid",
             for project in &portfolio.projects {
-                article { class: "project-card", key: "{project.id}",
-                    div { class: "project-head",
-                        div {
-                            p { class: "project-id", "{project.id}" }
-                            h4 { "{project.name}" }
-                        }
-                        span { class: health_class(project.health), "{project.health.label()}" }
-                    }
-                    div { class: "project-stats",
-                        ProjectStat { label: "Todo", value: project.work_items.todo }
-                        ProjectStat { label: "Running", value: project.work_items.in_progress }
-                        ProjectStat { label: "Review", value: project.work_items.in_review }
-                        ProjectStat { label: "Blocked", value: project.work_items.blocked }
-                    }
-                    footer {
-                        span { "Concurrency {project.work_items.in_progress}/{project.execution_cap}" }
-                        span { "{project.work_items.total} work items" }
+                ProjectCard {
+                    key: "{project.id}",
+                    project: project.clone(),
+                    execution_workspace: execution_workspaces
+                        .iter()
+                        .find(|connection| connection.project_id == project.id)
+                        .cloned(),
+                    on_connect,
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn ProjectCard(
+    project: gareji_board_domain::ProjectSummary,
+    execution_workspace: Option<ExecutionWorkspaceConnection>,
+    on_connect: EventHandler<(String, Option<ExecutionWorkspaceConnection>, String)>,
+) -> Element {
+    let initial_location = execution_workspace
+        .as_ref()
+        .and_then(|connection| connection.location.clone())
+        .unwrap_or_default();
+    let mut workspace_location = use_signal(move || initial_location);
+    let workspace_location_value = workspace_location.read().clone();
+    let connection_label = execution_workspace_label(execution_workspace.as_ref());
+    let can_connect = !workspace_location_value.trim().is_empty();
+    let project_id = project.id.clone();
+    let expected = execution_workspace.clone();
+    rsx! {
+        article { class: "project-card",
+            div { class: "project-head",
+                div {
+                    p { class: "project-id", "{project.id}" }
+                    h4 { "{project.name}" }
+                }
+                span { class: health_class(project.health), "{project.health.label()}" }
+            }
+            div { class: "project-stats",
+                ProjectStat { label: "Todo", value: project.work_items.todo }
+                ProjectStat { label: "Running", value: project.work_items.in_progress }
+                ProjectStat { label: "Review", value: project.work_items.in_review }
+                ProjectStat { label: "Blocked", value: project.work_items.blocked }
+            }
+            div { class: "execution-workspace-connection",
+                div {
+                    span { "Execution workspace" }
+                    strong { "{connection_label}" }
+                }
+                label {
+                    span { "Connect existing local directory" }
+                    input {
+                        aria_label: "Execution workspace for {project.id}",
+                        value: "{workspace_location_value}",
+                        maxlength: 2048,
+                        placeholder: "Select an existing project directory",
+                        oninput: move |event| workspace_location.set(event.value()),
                     }
                 }
+                button {
+                    class: "workspace-connect-action",
+                    disabled: !can_connect,
+                    onclick: move |_| {
+                        on_connect.call((
+                            project_id.clone(),
+                            expected.clone(),
+                            workspace_location_value.clone(),
+                        ));
+                    },
+                    "Connect directory"
+                }
+                small { "Stores a local connection only. It does not copy files or enable execution." }
+            }
+            footer {
+                span { "Concurrency {project.work_items.in_progress}/{project.execution_cap}" }
+                span { "{project.work_items.total} work items" }
             }
         }
     }

@@ -1,10 +1,7 @@
-use std::env;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
 use gareji_board_domain::AgentProfileSummary;
-
-const AGENT_WORKSPACE_ENV: &str = "GAREJI_AGENT_WORKSPACE";
 
 const BUNDLED_INSTRUCTIONS: &[(&str, &str)] = &[
     (
@@ -96,15 +93,6 @@ enum InspectionSource {
 
 impl AgentBehaviorInspector {
     #[must_use]
-    pub fn from_environment() -> Self {
-        env::var_os(AGENT_WORKSPACE_ENV)
-            .filter(|value| !value.is_empty())
-            .map_or_else(Self::bundled_sample, |value| {
-                Self::for_workspace(Path::new(&value))
-            })
-    }
-
-    #[must_use]
     pub fn label(&self) -> &str {
         &self.label
     }
@@ -127,14 +115,14 @@ impl AgentBehaviorInspector {
         }
     }
 
-    fn bundled_sample() -> Self {
+    pub fn bundled_sample() -> Self {
         Self {
             source: InspectionSource::BundledSample,
             label: "Bundled sample Execution workspace".to_owned(),
         }
     }
 
-    fn for_workspace(root: &Path) -> Self {
+    pub fn for_workspace(root: &Path) -> Self {
         let name = root
             .file_name()
             .and_then(|name| name.to_str())
@@ -146,6 +134,14 @@ impl AgentBehaviorInspector {
         Self {
             label: format!("Selected Execution workspace · {name}"),
             source: InspectionSource::ExecutionWorkspace(canonical_root),
+        }
+    }
+
+    #[must_use]
+    pub fn unavailable() -> Self {
+        Self {
+            source: InspectionSource::ExecutionWorkspace(None),
+            label: "No Execution workspace connected".to_owned(),
         }
     }
 }
@@ -422,7 +418,7 @@ mod tests {
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
                 .as_nanos();
-            let root = env::temp_dir().join(format!(
+            let root = std::env::temp_dir().join(format!(
                 "gareji-board-agent-inspection-{}-{nonce}",
                 std::process::id()
             ));

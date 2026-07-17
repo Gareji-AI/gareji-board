@@ -10,10 +10,11 @@ use gareji_board_domain::{
     ActiveWorkAssessment, ActivityTimeline, AgentPlan, AgentPlanUpdateReceipt,
     AgentPlanUpdateRequest, AgentProfileSaveReceipt, AgentProfileSaveRequest, AgentProfileSummary,
     ApprovalRequirement, AttachmentReceipt, AttachmentRequest, AttachmentTarget,
-    CheckpointAttachment, CheckpointReconciliation, PortfolioSnapshot, ProjectHealth,
-    ProjectSummary, ReconciliationDecision, ReconciliationReceipt, ReconciliationRequest,
-    WorkItemCounts, WorkItemState, WorkItemSummary, WorkItemTransitionReceipt,
-    WorkItemTransitionRequest,
+    CheckpointAttachment, CheckpointReconciliation, ExecutionWorkspaceConnection,
+    ExecutionWorkspaceKind, ExecutionWorkspaceSaveReceipt, ExecutionWorkspaceSaveRequest,
+    PortfolioSnapshot, ProjectHealth, ProjectSummary, ReconciliationDecision,
+    ReconciliationReceipt, ReconciliationRequest, WorkItemCounts, WorkItemState, WorkItemSummary,
+    WorkItemTransitionReceipt, WorkItemTransitionRequest,
 };
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params, params_from_iter};
 use thiserror::Error;
@@ -156,6 +157,7 @@ impl SqliteBoardStore {
                     ON board_checkpoint_attachments(project_id, work_item_id, attached_at);",
             )
             .map_err(StoreError::Sqlite)?;
+        create_execution_workspace_storage(&connection)?;
         migrate_agent_profile_columns(&connection)?;
         migrate_work_item_columns(&connection)?;
         set_schema_version(&connection)?;
@@ -181,6 +183,7 @@ impl SqliteBoardStore {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(StoreError::Sqlite)?;
         insert_sample_projects(&transaction)?;
+        insert_sample_execution_workspaces(&transaction)?;
         insert_sample_agent_profiles(&transaction)?;
         insert_sample_work_items(&transaction)?;
         transaction.commit().map_err(StoreError::Sqlite)?;
@@ -313,6 +316,126 @@ impl SqliteBoardStore {
             profiles[index].skill_refs.push(skill_ref);
         }
         Ok(profiles)
+    }
+
+    /// Load the locally selected Execution workspace for every Board project.
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage or corrupt-state error.
+    pub fn load_execution_workspaces(
+        &self,
+    ) -> Result<Vec<ExecutionWorkspaceConnection>, StoreError> {
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT project_id, kind, location
+                 FROM board_execution_workspaces
+                 ORDER BY project_id",
+            )
+            .map_err(StoreError::Sqlite)?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                ))
+            })
+            .map_err(StoreError::Sqlite)?;
+        rows.map(|row| {
+            let (project_id, kind, location) = row.map_err(StoreError::Sqlite)?;
+            let kind = ExecutionWorkspaceKind::try_from(kind.as_str())
+                .map_err(|_| StoreError::CorruptState("unknown Execution workspace kind"))?;
+            canonical_execution_workspace(&ExecutionWorkspaceConnection {
+                project_id,
+                kind,
+                location,
+            })
+        })
+        .collect()
+    }
+
+    /// Atomically replace one Board project's locally selected Execution workspace.
+    ///
+    /// # Errors
+    ///
+    /// Returns a bounded validation, lookup, concurrent-change, storage, or
+    /// corrupt-state error. Saving the stored connection is a successful no-op.
+    pub fn save_execution_workspace(
+        &mut self,
+        request: &ExecutionWorkspaceSaveRequest,
+    ) -> Result<ExecutionWorkspaceSaveReceipt, StoreError> {
+        let expected = request
+            .expected
+            .as_ref()
+            .map(canonical_execution_workspace)
+            .transpose()?;
+        let target = canonical_execution_workspace(&request.target)?;
+        if expected
+            .as_ref()
+            .is_some_and(|connection| connection.project_id != target.project_id)
+        {
+            return Err(StoreError::InvalidRequest);
+        }
+
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(StoreError::Sqlite)?;
+        let project_exists: bool = transaction
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM board_projects WHERE id = ?1)",
+                [&target.project_id],
+                |row| row.get(0),
+            )
+            .map_err(StoreError::Sqlite)?;
+        if !project_exists {
+            return Err(StoreError::ProjectNotFound);
+        }
+        let stored = load_execution_workspace(&transaction, &target.project_id)?;
+        match (&expected, &stored) {
+            (None, Some(_)) | (Some(_), None) => return Err(StoreError::ConcurrentChange),
+            (Some(observed), Some(current)) if observed != current => {
+                return Err(StoreError::ConcurrentChange);
+            }
+            _ => {}
+        }
+        if stored.as_ref() == Some(&target) {
+            return Ok(ExecutionWorkspaceSaveReceipt {
+                previous: stored,
+                resulting: target,
+                changed: false,
+            });
+        }
+
+        if stored.is_none() {
+            transaction
+                .execute(
+                    "INSERT INTO board_execution_workspaces (project_id, kind, location)
+                     VALUES (?1, ?2, ?3)",
+                    params![target.project_id, target.kind.as_str(), target.location],
+                )
+                .map_err(StoreError::Sqlite)?;
+        } else {
+            let changed = transaction
+                .execute(
+                    "UPDATE board_execution_workspaces
+                     SET kind = ?1, location = ?2
+                     WHERE project_id = ?3",
+                    params![target.kind.as_str(), target.location, target.project_id],
+                )
+                .map_err(StoreError::Sqlite)?;
+            if changed != 1 {
+                return Err(StoreError::ConcurrentChange);
+            }
+        }
+        transaction.commit().map_err(StoreError::Sqlite)?;
+        Ok(ExecutionWorkspaceSaveReceipt {
+            previous: stored,
+            resulting: target,
+            changed: true,
+        })
     }
 
     /// Create or atomically replace one Board-owned Agent profile.
@@ -1095,9 +1218,22 @@ fn migrate_agent_profile_columns(connection: &Connection) -> Result<(), StoreErr
     Ok(())
 }
 
+fn create_execution_workspace_storage(connection: &Connection) -> Result<(), StoreError> {
+    connection
+        .execute_batch(
+            "CREATE TABLE IF NOT EXISTS board_execution_workspaces (
+               project_id TEXT PRIMARY KEY,
+               kind TEXT NOT NULL CHECK (kind IN ('bundled_sample', 'local_directory')),
+               location TEXT,
+               FOREIGN KEY (project_id) REFERENCES board_projects(id) ON DELETE CASCADE
+             );",
+        )
+        .map_err(StoreError::Sqlite)
+}
+
 fn set_schema_version(connection: &Connection) -> Result<(), StoreError> {
     connection
-        .execute_batch("PRAGMA user_version = 7;")
+        .execute_batch("PRAGMA user_version = 8;")
         .map_err(StoreError::Sqlite)
 }
 
@@ -1118,6 +1254,21 @@ fn insert_sample_projects(transaction: &rusqlite::Transaction<'_>) -> Result<(),
                 "INSERT INTO board_projects (id, name, health, execution_cap)
                  VALUES (?1, ?2, ?3, ?4)",
                 params![project.0, project.1, project.2, project.3],
+            )
+            .map_err(StoreError::Sqlite)?;
+    }
+    Ok(())
+}
+
+fn insert_sample_execution_workspaces(
+    transaction: &rusqlite::Transaction<'_>,
+) -> Result<(), StoreError> {
+    for project_id in ["gareji-board", "gareji-core", "zettelkasten-plugin"] {
+        transaction
+            .execute(
+                "INSERT INTO board_execution_workspaces (project_id, kind, location)
+                 VALUES (?1, 'bundled_sample', NULL)",
+                [project_id],
             )
             .map_err(StoreError::Sqlite)?;
     }
@@ -1403,6 +1554,38 @@ fn load_required_capabilities(
     capabilities
         .collect::<Result<Vec<_>, _>>()
         .map_err(StoreError::Sqlite)
+}
+
+fn load_execution_workspace(
+    connection: &Connection,
+    project_id: &str,
+) -> Result<Option<ExecutionWorkspaceConnection>, StoreError> {
+    let raw = connection
+        .query_row(
+            "SELECT project_id, kind, location
+             FROM board_execution_workspaces
+             WHERE project_id = ?1",
+            [project_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(StoreError::Sqlite)?;
+    raw.map(|(project_id, kind, location)| {
+        let kind = ExecutionWorkspaceKind::try_from(kind.as_str())
+            .map_err(|_| StoreError::CorruptState("unknown Execution workspace kind"))?;
+        canonical_execution_workspace(&ExecutionWorkspaceConnection {
+            project_id,
+            kind,
+            location,
+        })
+    })
+    .transpose()
 }
 
 fn load_agent_profile(
@@ -1724,6 +1907,34 @@ fn validate_capability(value: &str) -> Result<(), StoreError> {
     Ok(())
 }
 
+fn canonical_execution_workspace(
+    connection: &ExecutionWorkspaceConnection,
+) -> Result<ExecutionWorkspaceConnection, StoreError> {
+    validate_id(&connection.project_id)?;
+    let location = match (connection.kind, &connection.location) {
+        (ExecutionWorkspaceKind::BundledSample, None) => None,
+        (ExecutionWorkspaceKind::BundledSample, Some(_))
+        | (ExecutionWorkspaceKind::LocalDirectory, None) => return Err(StoreError::InvalidRequest),
+        (ExecutionWorkspaceKind::LocalDirectory, Some(location)) => {
+            let length = location.chars().count();
+            if length == 0
+                || length > 2048
+                || location.trim() != location
+                || location.chars().any(char::is_control)
+                || !Path::new(location).is_absolute()
+            {
+                return Err(StoreError::InvalidRequest);
+            }
+            Some(location.clone())
+        }
+    };
+    Ok(ExecutionWorkspaceConnection {
+        project_id: connection.project_id.clone(),
+        kind: connection.kind,
+        location,
+    })
+}
+
 #[derive(Debug, Error)]
 pub enum StoreError {
     #[error("request did not satisfy the Board contract")]
@@ -1776,6 +1987,12 @@ mod tests {
 
         let work_items = store.load_work_items().unwrap();
         let profiles = store.load_agent_profiles().unwrap();
+        let execution_workspaces = store.load_execution_workspaces().unwrap();
+        assert_eq!(execution_workspaces.len(), 3);
+        assert!(execution_workspaces.iter().all(|connection| {
+            connection.kind == ExecutionWorkspaceKind::BundledSample
+                && connection.location.is_none()
+        }));
         assert_eq!(profiles.len(), 4);
         assert_eq!(profiles[0].id, "implementer");
         assert_eq!(
@@ -1812,6 +2029,84 @@ mod tests {
             candidate.required_capabilities,
             vec!["implementation".to_owned()]
         );
+    }
+
+    #[test]
+    fn execution_workspace_save_is_atomic_idempotent_and_rejects_stale_observations() {
+        let mut store = SqliteBoardStore::open_in_memory().unwrap();
+        store.seed_sample_if_empty().unwrap();
+        let existing = store
+            .load_execution_workspaces()
+            .unwrap()
+            .into_iter()
+            .find(|connection| connection.project_id == "gareji-board")
+            .unwrap();
+        let target = ExecutionWorkspaceConnection {
+            project_id: "gareji-board".to_owned(),
+            kind: ExecutionWorkspaceKind::LocalDirectory,
+            location: Some(std::env::temp_dir().display().to_string()),
+        };
+
+        let saved = store
+            .save_execution_workspace(&ExecutionWorkspaceSaveRequest {
+                expected: Some(existing.clone()),
+                target: target.clone(),
+            })
+            .unwrap();
+        assert!(saved.changed);
+        assert_eq!(saved.previous, Some(existing));
+        assert_eq!(saved.resulting, target);
+
+        let unchanged = store
+            .save_execution_workspace(&ExecutionWorkspaceSaveRequest {
+                expected: Some(saved.resulting.clone()),
+                target: saved.resulting.clone(),
+            })
+            .unwrap();
+        assert!(!unchanged.changed);
+        assert!(matches!(
+            store.save_execution_workspace(&ExecutionWorkspaceSaveRequest {
+                expected: Some(ExecutionWorkspaceConnection {
+                    project_id: "gareji-board".to_owned(),
+                    kind: ExecutionWorkspaceKind::BundledSample,
+                    location: None,
+                }),
+                target,
+            }),
+            Err(StoreError::ConcurrentChange)
+        ));
+    }
+
+    #[test]
+    fn execution_workspace_save_validates_project_and_connection_shape() {
+        let mut store = SqliteBoardStore::open_in_memory().unwrap();
+        store.seed_sample_if_empty().unwrap();
+        assert!(matches!(
+            store.save_execution_workspace(&ExecutionWorkspaceSaveRequest {
+                expected: None,
+                target: ExecutionWorkspaceConnection {
+                    project_id: "missing-project".to_owned(),
+                    kind: ExecutionWorkspaceKind::BundledSample,
+                    location: None,
+                },
+            }),
+            Err(StoreError::ProjectNotFound)
+        ));
+        assert!(matches!(
+            store.save_execution_workspace(&ExecutionWorkspaceSaveRequest {
+                expected: Some(ExecutionWorkspaceConnection {
+                    project_id: "gareji-core".to_owned(),
+                    kind: ExecutionWorkspaceKind::BundledSample,
+                    location: None,
+                }),
+                target: ExecutionWorkspaceConnection {
+                    project_id: "gareji-core".to_owned(),
+                    kind: ExecutionWorkspaceKind::BundledSample,
+                    location: Some("not-allowed".to_owned()),
+                },
+            }),
+            Err(StoreError::InvalidRequest)
+        ));
     }
 
     #[test]
@@ -2484,11 +2779,7 @@ mod tests {
             })
             .unwrap();
         assert_eq!(receipt.attachment.work_item_id, "CORE-1");
-        let version: i64 = store
-            .connection
-            .query_row("PRAGMA user_version", [], |row| row.get(0))
-            .unwrap();
-        assert_eq!(version, 7);
+        assert_current_execution_workspace_schema(&store);
         let priority: i64 = store
             .connection
             .query_row(
@@ -2541,6 +2832,26 @@ mod tests {
             .unwrap();
         assert!(agent_profile_table_exists);
         assert_agent_behavior_schema(&store);
+    }
+
+    fn assert_current_execution_workspace_schema(store: &SqliteBoardStore) {
+        let version: i64 = store
+            .connection
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 8);
+        let table_exists: bool = store
+            .connection
+            .query_row(
+                "SELECT EXISTS(
+                   SELECT 1 FROM sqlite_master
+                   WHERE type = 'table' AND name = 'board_execution_workspaces'
+                 )",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(table_exists);
     }
 
     #[test]
