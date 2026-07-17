@@ -1,5 +1,6 @@
 //! Board-owned portfolio terminology and read models.
 
+use std::collections::HashMap;
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
@@ -516,7 +517,7 @@ impl PortfolioSnapshot {
         self.projects
             .iter()
             .map(|project| project.work_items.in_progress)
-            .sum()
+            .fold(0, u32::saturating_add)
     }
 
     #[must_use]
@@ -525,6 +526,224 @@ impl PortfolioSnapshot {
             .iter()
             .map(|project| project.work_items.blocked)
             .sum()
+    }
+}
+
+/// Controller-wide result for one read-only Safe Autopilot preview.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AutopilotDecision {
+    Continue,
+    Stop,
+}
+
+impl AutopilotDecision {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Continue => "continue",
+            Self::Stop => "stop",
+        }
+    }
+}
+
+/// One Work item selected by the read-only candidate preview.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AutopilotCandidate {
+    pub work_item: WorkItemSummary,
+    pub project_name: String,
+    pub active_runs: u32,
+    pub execution_cap: u32,
+}
+
+/// Expected reason why one Work item did not become the preview candidate.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CandidateSkipReason {
+    StateNotTodo(WorkItemState),
+    ProjectAtCapacity {
+        active_runs: u32,
+        execution_cap: u32,
+    },
+    GlobalCapacityReached {
+        active_runs: u32,
+        concurrency_cap: u32,
+    },
+    LowerRanked,
+}
+
+/// One candidate-level explanation returned by Safe Autopilot preview.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CandidateSkip {
+    pub work_item: WorkItemSummary,
+    pub reason: CandidateSkipReason,
+}
+
+/// Expected successful result when no Work item may be previewed this tick.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NoCandidateReason {
+    GlobalCapacityReached {
+        active_runs: u32,
+        concurrency_cap: u32,
+    },
+    NoRunnableCandidate,
+}
+
+/// Invalid input that makes the read-only preview fail closed.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum AutopilotStopReason {
+    InvalidGlobalConcurrencyCap,
+    InvalidProjectCapacity { project_id: String },
+    DuplicateProject { project_id: String },
+    ProjectNotFound { project_id: String },
+}
+
+/// Bounded outcome of one read-only Safe Autopilot selection pass.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SafeAutopilotOutcome {
+    Candidate(AutopilotCandidate),
+    NoCandidate(NoCandidateReason),
+    Stop(AutopilotStopReason),
+}
+
+/// Pure deterministic selector used by the desktop preview.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SafeAutopilotPreview {
+    pub outcome: SafeAutopilotOutcome,
+    pub skipped: Vec<CandidateSkip>,
+}
+
+impl SafeAutopilotPreview {
+    /// Evaluate current Board-owned facts without mutating or reserving them.
+    #[must_use]
+    pub fn evaluate(
+        portfolio: &PortfolioSnapshot,
+        work_items: &[WorkItemSummary],
+        global_concurrency_cap: u32,
+    ) -> Self {
+        if global_concurrency_cap == 0 {
+            return Self::stopped(AutopilotStopReason::InvalidGlobalConcurrencyCap);
+        }
+
+        let mut projects = HashMap::with_capacity(portfolio.projects.len());
+        for project in &portfolio.projects {
+            if project.execution_cap == 0 {
+                return Self::stopped(AutopilotStopReason::InvalidProjectCapacity {
+                    project_id: project.id.clone(),
+                });
+            }
+            if projects.insert(project.id.as_str(), project).is_some() {
+                return Self::stopped(AutopilotStopReason::DuplicateProject {
+                    project_id: project.id.clone(),
+                });
+            }
+        }
+
+        for work_item in work_items {
+            if !projects.contains_key(work_item.project_id.as_str()) {
+                return Self::stopped(AutopilotStopReason::ProjectNotFound {
+                    project_id: work_item.project_id.clone(),
+                });
+            }
+        }
+
+        let active_runs = portfolio.active_runs();
+        let global_capacity_reached = active_runs >= global_concurrency_cap;
+        let mut runnable = Vec::new();
+        let mut skipped = Vec::new();
+
+        for work_item in work_items {
+            let project = projects[work_item.project_id.as_str()];
+            let reason = if work_item.state != WorkItemState::Todo {
+                Some(CandidateSkipReason::StateNotTodo(work_item.state))
+            } else if global_capacity_reached {
+                Some(CandidateSkipReason::GlobalCapacityReached {
+                    active_runs,
+                    concurrency_cap: global_concurrency_cap,
+                })
+            } else if project.work_items.in_progress >= project.execution_cap {
+                Some(CandidateSkipReason::ProjectAtCapacity {
+                    active_runs: project.work_items.in_progress,
+                    execution_cap: project.execution_cap,
+                })
+            } else {
+                None
+            };
+
+            if let Some(reason) = reason {
+                skipped.push(CandidateSkip {
+                    work_item: work_item.clone(),
+                    reason,
+                });
+            } else {
+                runnable.push((work_item, project));
+            }
+        }
+
+        runnable.sort_by(|(left_item, left_project), (right_item, right_project)| {
+            let left_load = u64::from(left_project.work_items.in_progress)
+                * u64::from(right_project.execution_cap);
+            let right_load = u64::from(right_project.work_items.in_progress)
+                * u64::from(left_project.execution_cap);
+            left_load
+                .cmp(&right_load)
+                .then_with(|| left_item.priority.cmp(&right_item.priority))
+                .then_with(|| left_project.id.cmp(&right_project.id))
+                .then_with(|| left_item.id.cmp(&right_item.id))
+        });
+
+        let outcome = if runnable.is_empty() {
+            if global_capacity_reached {
+                SafeAutopilotOutcome::NoCandidate(NoCandidateReason::GlobalCapacityReached {
+                    active_runs,
+                    concurrency_cap: global_concurrency_cap,
+                })
+            } else {
+                SafeAutopilotOutcome::NoCandidate(NoCandidateReason::NoRunnableCandidate)
+            }
+        } else {
+            let (work_item, project) = runnable.remove(0);
+            for (lower_ranked, _) in runnable {
+                skipped.push(CandidateSkip {
+                    work_item: lower_ranked.clone(),
+                    reason: CandidateSkipReason::LowerRanked,
+                });
+            }
+            SafeAutopilotOutcome::Candidate(AutopilotCandidate {
+                work_item: work_item.clone(),
+                project_name: project.name.clone(),
+                active_runs: project.work_items.in_progress,
+                execution_cap: project.execution_cap,
+            })
+        };
+
+        skipped.sort_by(|left, right| {
+            left.work_item
+                .project_id
+                .cmp(&right.work_item.project_id)
+                .then_with(|| left.work_item.id.cmp(&right.work_item.id))
+        });
+        Self { outcome, skipped }
+    }
+
+    #[must_use]
+    pub const fn decision(&self) -> AutopilotDecision {
+        match &self.outcome {
+            SafeAutopilotOutcome::Stop(_) => AutopilotDecision::Stop,
+            SafeAutopilotOutcome::Candidate(_) | SafeAutopilotOutcome::NoCandidate(_) => {
+                AutopilotDecision::Continue
+            }
+        }
+    }
+
+    #[must_use]
+    pub const fn fast_exit_required(&self) -> bool {
+        !matches!(&self.outcome, SafeAutopilotOutcome::Candidate(_))
+    }
+
+    fn stopped(reason: AutopilotStopReason) -> Self {
+        Self {
+            outcome: SafeAutopilotOutcome::Stop(reason),
+            skipped: Vec::new(),
+        }
     }
 }
 
@@ -658,5 +877,133 @@ mod tests {
         assert!(!WorkItemState::InReview.can_accept_recommendation(WorkItemState::Todo));
         assert!(!WorkItemState::Done.can_accept_recommendation(WorkItemState::InReview));
         assert!(!WorkItemState::Cancelled.can_accept_recommendation(WorkItemState::Done));
+    }
+
+    #[test]
+    fn candidate_preview_prefers_the_least_loaded_project() {
+        let portfolio = PortfolioSnapshot {
+            projects: vec![project("board", 1, 2), project("core", 0, 1)],
+        };
+        let work_items = vec![
+            work_item("BOARD-1", "board", 1, WorkItemState::Todo),
+            work_item("CORE-1", "core", 9, WorkItemState::Todo),
+            work_item("CORE-2", "core", 1, WorkItemState::Blocked),
+        ];
+
+        let preview = SafeAutopilotPreview::evaluate(&portfolio, &work_items, 3);
+
+        let SafeAutopilotOutcome::Candidate(candidate) = &preview.outcome else {
+            panic!("expected a candidate")
+        };
+        assert_eq!(candidate.work_item.id, "CORE-1");
+        assert_eq!(candidate.active_runs, 0);
+        assert_eq!(candidate.execution_cap, 1);
+        assert_eq!(preview.decision(), AutopilotDecision::Continue);
+        assert!(!preview.fast_exit_required());
+        assert!(preview.skipped.iter().any(|skip| {
+            skip.work_item.id == "BOARD-1" && skip.reason == CandidateSkipReason::LowerRanked
+        }));
+        assert!(preview.skipped.iter().any(|skip| {
+            skip.work_item.id == "CORE-2"
+                && skip.reason == CandidateSkipReason::StateNotTodo(WorkItemState::Blocked)
+        }));
+    }
+
+    #[test]
+    fn candidate_preview_uses_priority_then_stable_id_ties() {
+        let portfolio = PortfolioSnapshot {
+            projects: vec![project("beta", 0, 1), project("alpha", 0, 1)],
+        };
+        let work_items = vec![
+            work_item("B-1", "beta", 1, WorkItemState::Todo),
+            work_item("A-2", "alpha", 1, WorkItemState::Todo),
+            work_item("A-1", "alpha", 1, WorkItemState::Todo),
+            work_item("A-0", "alpha", 2, WorkItemState::Todo),
+        ];
+
+        let preview = SafeAutopilotPreview::evaluate(&portfolio, &work_items, 2);
+
+        let SafeAutopilotOutcome::Candidate(candidate) = preview.outcome else {
+            panic!("expected a candidate")
+        };
+        assert_eq!(candidate.work_item.id, "A-1");
+    }
+
+    #[test]
+    fn candidate_preview_fast_exits_when_global_capacity_is_reached() {
+        let portfolio = PortfolioSnapshot {
+            projects: vec![project("core", 1, 2)],
+        };
+        let work_items = vec![work_item("CORE-1", "core", 1, WorkItemState::Todo)];
+
+        let preview = SafeAutopilotPreview::evaluate(&portfolio, &work_items, 1);
+
+        assert_eq!(
+            preview.outcome,
+            SafeAutopilotOutcome::NoCandidate(NoCandidateReason::GlobalCapacityReached {
+                active_runs: 1,
+                concurrency_cap: 1,
+            })
+        );
+        assert_eq!(preview.decision(), AutopilotDecision::Continue);
+        assert!(preview.fast_exit_required());
+        assert_eq!(
+            preview.skipped[0].reason,
+            CandidateSkipReason::GlobalCapacityReached {
+                active_runs: 1,
+                concurrency_cap: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn candidate_preview_fails_closed_for_invalid_relationships() {
+        let portfolio = PortfolioSnapshot {
+            projects: vec![project("core", 0, 1)],
+        };
+        let missing_project = vec![work_item("BOARD-1", "board", 1, WorkItemState::Todo)];
+
+        let preview = SafeAutopilotPreview::evaluate(&portfolio, &missing_project, 2);
+        assert_eq!(
+            preview.outcome,
+            SafeAutopilotOutcome::Stop(AutopilotStopReason::ProjectNotFound {
+                project_id: "board".to_owned(),
+            })
+        );
+        assert_eq!(preview.decision(), AutopilotDecision::Stop);
+        assert!(preview.fast_exit_required());
+
+        assert_eq!(
+            SafeAutopilotPreview::evaluate(&portfolio, &[], 0).outcome,
+            SafeAutopilotOutcome::Stop(AutopilotStopReason::InvalidGlobalConcurrencyCap)
+        );
+    }
+
+    fn project(id: &str, active_runs: u32, execution_cap: u32) -> ProjectSummary {
+        ProjectSummary {
+            id: id.to_owned(),
+            name: id.to_owned(),
+            health: ProjectHealth::Healthy,
+            execution_cap,
+            work_items: WorkItemCounts {
+                in_progress: active_runs,
+                ..WorkItemCounts::default()
+            },
+        }
+    }
+
+    fn work_item(
+        id: &str,
+        project_id: &str,
+        priority: u32,
+        state: WorkItemState,
+    ) -> WorkItemSummary {
+        WorkItemSummary {
+            id: id.to_owned(),
+            project_id: project_id.to_owned(),
+            title: id.to_owned(),
+            priority,
+            state,
+        }
     }
 }
