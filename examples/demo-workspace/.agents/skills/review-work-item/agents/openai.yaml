@@ -1,0 +1,4 @@
+interface:
+  display_name: "Review Work Item"
+  short_description: "Review a change against its work item"
+  default_prompt: "Use $review-work-item to review the current change against its acceptance criteria."

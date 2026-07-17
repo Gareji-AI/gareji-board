@@ -1,0 +1,42 @@
+{
+  "schema_version": "gareji.progress-checkpoint.v0",
+  "checkpoint_id": "checkpoint-demo-001",
+  "recorded_at": "2026-07-17T12:00:00+09:00",
+  "project_id": "board",
+  "work_item_id": "BOARD-1",
+  "execution_workspace_id": "board-local",
+  "source": "manual_cli",
+  "actor": {
+    "type": "human",
+    "id": "demo-user"
+  },
+  "outcome": "needs_review",
+  "summary": "Prepared the first-launch and existing-project onboarding design and added four bundled sample Skills.",
+  "changed_paths": [
+    "docs/onboarding-design.md",
+    "examples/demo-board.json",
+    "examples/demo-workspace/.agents/skills"
+  ],
+  "git": {
+    "head": null,
+    "branch": "main",
+    "dirty": true
+  },
+  "verification": [
+    {
+      "name": "sample Skills validation",
+      "status": "passed",
+      "evidence_ref": "run://demo/skill-validation"
+    },
+    {
+      "name": "demo JSON parse",
+      "status": "passed",
+      "evidence_ref": "file://examples/demo-board.json"
+    }
+  ],
+  "evidence_refs": [
+    "file://docs/onboarding-design.md",
+    "file://examples/demo-board.json"
+  ],
+  "recommended_state": "in_review"
+}

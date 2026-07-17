@@ -1,0 +1,188 @@
+{
+  "schema_version": "gareji-board-demo.v0",
+  "board": {
+    "name": "Demo workspace",
+    "launch_mode": "disposable_sample",
+    "runner": {
+      "runtime": "codex",
+      "default_model": "gpt-5.6",
+      "output_mode": "jsonl"
+    },
+    "autopilot": {
+      "enabled": true,
+      "policy_profile": "gareji_safe_autopilot_v0",
+      "max_concurrent_runs": 2,
+      "max_concurrent_runs_per_project": 1,
+      "max_starts_per_tick": 1,
+      "eligible_states": ["todo"],
+      "requires_human_approval_for": ["public", "secret", "destructive", "production"]
+    },
+    "progress_capture": {
+      "enabled": true,
+      "checkpoint_schema": "schemas/progress-checkpoint-v0.schema.json",
+      "sources": ["runner", "mcp", "manual_cli", "codex_stop_hook"],
+      "fixture": "examples/progress-checkpoint.json",
+      "knowledge_projection_write_policy": "human_review"
+    },
+    "local_state": {
+      "engine": "sqlite",
+      "location": "os_app_data",
+      "demo_database": "demo-session://state/gareji-board.sqlite"
+    }
+  },
+  "skill_catalog": [
+    {"id": "summarize-project-context", "source": "examples/demo-workspace/.agents/skills/summarize-project-context", "trust": "bundled"},
+    {"id": "implement-bounded-work-item", "source": "examples/demo-workspace/.agents/skills/implement-bounded-work-item", "trust": "bundled"},
+    {"id": "review-work-item", "source": "examples/demo-workspace/.agents/skills/review-work-item", "trust": "bundled"},
+    {"id": "write-project-handoff", "source": "examples/demo-workspace/.agents/skills/write-project-handoff", "trust": "bundled"}
+  ],
+  "knowledge_adapter_catalog": [
+    {"id": "local_json", "role": "bundled_demo", "availability": "available"},
+    {"id": "zettelkasten_markdown", "role": "first_real", "availability": "available"},
+    {"id": "gbrain", "role": "future", "availability": "planned"},
+    {"id": "llmwiki", "role": "future", "availability": "planned"}
+  ],
+  "knowledge_workspaces": [
+    {
+      "id": "demo-json",
+      "adapter": "local_json",
+      "name": "Bundled local JSON knowledge",
+      "location": "examples/demo-knowledge.json",
+      "sync_status": "local"
+    },
+    {
+      "id": "demo-notes",
+      "adapter": "zettelkasten_markdown",
+      "name": "Bundled Markdown Zettelkasten demo",
+      "location": "examples/demo-workspace/",
+      "project_directory": "4_Project",
+      "sync_status": "local"
+    }
+  ],
+  "knowledge_connections": [
+    {"id": "board-json", "project_id": "board", "workspace_id": "demo-json", "read_policy": "enabled", "progress_write_policy": "enabled", "delivery_requirement": "required"},
+    {"id": "board-notes", "project_id": "board", "workspace_id": "demo-notes", "read_policy": "enabled", "progress_write_policy": "enabled", "delivery_requirement": "required"},
+    {"id": "core-json", "project_id": "core", "workspace_id": "demo-json", "read_policy": "enabled", "progress_write_policy": "enabled", "delivery_requirement": "required"},
+    {"id": "core-notes", "project_id": "core", "workspace_id": "demo-notes", "read_policy": "enabled", "progress_write_policy": "enabled", "delivery_requirement": "required"},
+    {"id": "zettelkasten-plugin-json", "project_id": "zettelkasten-plugin", "workspace_id": "demo-json", "read_policy": "enabled", "progress_write_policy": "enabled", "delivery_requirement": "required"},
+    {"id": "zettelkasten-plugin-notes", "project_id": "zettelkasten-plugin", "workspace_id": "demo-notes", "read_policy": "enabled", "progress_write_policy": "enabled", "delivery_requirement": "required"}
+  ],
+  "context_sources": [
+    {
+      "id": "board-project-json",
+      "workspace_id": "demo-json",
+      "path": "projects.board",
+      "write_policy": "progress_only"
+    },
+    {
+      "id": "board-project-note",
+      "workspace_id": "demo-notes",
+      "path": "4_Project/Gareji-Board/PROJECT.md",
+      "write_policy": "human_review"
+    },
+    {
+      "id": "core-project-json",
+      "workspace_id": "demo-json",
+      "path": "projects.core",
+      "write_policy": "progress_only"
+    },
+    {
+      "id": "core-project-note",
+      "workspace_id": "demo-notes",
+      "path": "4_Project/Gareji-Core/PROJECT.md",
+      "write_policy": "human_review"
+    },
+    {
+      "id": "zettelkasten-plugin-project-json",
+      "workspace_id": "demo-json",
+      "path": "projects.zettelkasten-plugin",
+      "write_policy": "progress_only"
+    },
+    {
+      "id": "zettelkasten-plugin-project-note",
+      "workspace_id": "demo-notes",
+      "path": "4_Project/Zettelkasten-Plugin/PROJECT.md",
+      "write_policy": "human_review"
+    }
+  ],
+  "execution_workspaces": [
+    {
+      "id": "board-local",
+      "project_id": "board",
+      "location": "demo-session://projects/gareji-board",
+      "connection_status": "materialized_on_launch",
+      "write_policy": "workspace_write"
+    },
+    {
+      "id": "core-local",
+      "project_id": "core",
+      "location": "demo-session://projects/gareji-core",
+      "connection_status": "materialized_on_launch",
+      "write_policy": "workspace_write"
+    },
+    {
+      "id": "zettelkasten-plugin-local",
+      "project_id": "zettelkasten-plugin",
+      "location": "demo-session://projects/zettelkasten-plugin",
+      "connection_status": "materialized_on_launch",
+      "write_policy": "workspace_write"
+    }
+  ],
+  "agents": [
+    {"id": "researcher", "role": "Researcher", "capabilities": ["analyze", "summarize"], "skills": ["summarize-project-context", "write-project-handoff"], "model": "inherit", "plugin": "demo-research"},
+    {"id": "implementer", "role": "Implementer", "capabilities": ["implement", "test"], "skills": ["implement-bounded-work-item", "write-project-handoff"], "model": "inherit", "plugin": "demo-implement"},
+    {"id": "reviewer", "role": "Reviewer", "capabilities": ["review", "verify"], "skills": ["review-work-item", "write-project-handoff"], "model": "inherit", "plugin": "demo-review"},
+    {"id": "writer", "role": "Docs writer", "capabilities": ["write", "summarize"], "skills": ["summarize-project-context", "write-project-handoff"], "model": "inherit", "plugin": "demo-write"}
+  ],
+  "projects": [
+    {"id": "core", "name": "Gareji Core", "health": "healthy", "execution_cap": 1, "execution_workspace_ids": ["core-local"], "context_source_ids": ["core-project-json", "core-project-note"]},
+    {"id": "board", "name": "Gareji Board", "health": "needs_review", "execution_cap": 1, "execution_workspace_ids": ["board-local"], "context_source_ids": ["board-project-json", "board-project-note"]},
+    {"id": "zettelkasten-plugin", "name": "Zettelkasten Plugin", "health": "healthy", "execution_cap": 1, "execution_workspace_ids": ["zettelkasten-plugin-local"], "context_source_ids": ["zettelkasten-plugin-project-json", "zettelkasten-plugin-project-note"]}
+  ],
+  "work_items": [
+    {
+      "id": "BOARD-1",
+      "project_id": "board",
+      "title": "Turn the project notes into a demo brief",
+      "state": "todo",
+      "priority": 1,
+      "agent_id": "writer",
+      "context_source_ids": ["board-project-json", "board-project-note"],
+      "context": "Use the bundled Markdown notes; create a short, reviewable summary.",
+      "approval_requirement": "none"
+    },
+    {
+      "id": "BOARD-2",
+      "project_id": "core",
+      "title": "Publish a production release",
+      "state": "blocked",
+      "priority": 2,
+      "agent_id": "implementer",
+      "context": "A human must approve release credentials and final publication.",
+      "approval_requirement": "public"
+    },
+    {
+      "id": "ZK-1",
+      "project_id": "zettelkasten-plugin",
+      "title": "Import the bundled project directory",
+      "state": "todo",
+      "priority": 3,
+      "agent_id": "researcher",
+      "context_source_ids": ["zettelkasten-plugin-project-json", "zettelkasten-plugin-project-note"],
+      "context": "Inspect the bundled 4_Project directory and return the discovered product projects with source evidence.",
+      "approval_requirement": "none"
+    }
+  ],
+  "runs": [
+    {
+      "id": "run-demo-001",
+      "work_item_id": "BOARD-2",
+      "outcome": "blocked",
+      "resolved_model": "gpt-5.6",
+      "model_source": "workspace_default",
+      "failure_category": "approval_required",
+      "next_action": "Ask a human to approve or reject publication.",
+      "evidence": ["approval_requirement=public"]
+    }
+  ]
+}

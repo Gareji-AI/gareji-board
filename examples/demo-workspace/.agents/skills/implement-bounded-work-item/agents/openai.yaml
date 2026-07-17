@@ -1,0 +1,4 @@
+interface:
+  display_name: "Implement Bounded Work Item"
+  short_description: "Implement one safe, scoped project change"
+  default_prompt: "Use $implement-bounded-work-item to implement this approved work item and verify the result."

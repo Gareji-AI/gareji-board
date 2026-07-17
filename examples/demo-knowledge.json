@@ -1,0 +1,17 @@
+{
+  "schema_version": "gareji-demo-knowledge.v0",
+  "projects": {
+    "board": {
+      "summary": "Make autonomous project work visible and reviewable.",
+      "progress": []
+    },
+    "core": {
+      "summary": "Run trusted agent work through stable execution interfaces.",
+      "progress": []
+    },
+    "zettelkasten-plugin": {
+      "summary": "Connect Markdown Zettelkasten project context to Gareji.",
+      "progress": []
+    }
+  }
+}

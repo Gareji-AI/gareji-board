@@ -1,0 +1,4 @@
+interface:
+  display_name: "Write Project Handoff"
+  short_description: "Write a concise evidence-linked handoff"
+  default_prompt: "Use $write-project-handoff to produce a concise project handoff with evidence and next actions."

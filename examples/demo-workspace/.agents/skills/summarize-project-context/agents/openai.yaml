@@ -1,0 +1,4 @@
+interface:
+  display_name: "Summarize Project Context"
+  short_description: "Create an evidence-backed project brief"
+  default_prompt: "Use $summarize-project-context to summarize the connected project context with evidence."
