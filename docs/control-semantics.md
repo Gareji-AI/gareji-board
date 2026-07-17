@@ -78,6 +78,21 @@ These conditions skip one candidate while allowing the controller to consider an
 - required agent capabilities are unavailable;
 - a daily start cap, review cap, or drip-queue cooldown applies.
 
+## Read-only candidate preview
+
+The desktop Board may evaluate a bounded candidate preview before Runner execution is connected. This preview is explanatory only: it never creates a Run, changes Work item state, reserves capacity, or grants execution authority. Dependency, approval, cooldown, agent-capability, workspace, and evidence preflights remain required before a later execution path may start the selected item.
+
+The v0 preview considers only canonical `todo` Work items whose Board project is below its execution cap. It ranks runnable candidates deterministically by:
+
+1. lowest project execution-cap utilization, compared as exact fractions;
+2. lowest numeric Work item priority;
+3. project ID;
+4. Work item ID.
+
+The preview reports state-ineligible, project-capacity, and lower-ranked candidates separately so the person can understand the result. Reaching the configured global concurrency cap or finding no runnable candidate returns `decision=continue`, no candidate, and `fast_exit_required=true`; it is not a failure. A zero global cap or a Work item whose project is missing from the portfolio fails closed with `decision=stop`, no candidate, and `fast_exit_required=true`.
+
+Work items created from the Activity Inbox receive priority `100` until explicit priority editing is implemented. The bundled desktop sample uses a global preview concurrency cap of `2`.
+
 ## Compatibility defaults
 
 | Limit | Value |
@@ -91,5 +106,6 @@ These conditions skip one candidate while allowing the controller to consider an
 | Todo Runner review-fix starts per day | 10 |
 | Review soft / hard / stop caps | 15 / 25 / 35 |
 | Todo Runner starts per tick | 1 |
+| Desktop preview global concurrent Runs | 2 |
 
 Later products may expose custom policy profiles. The `gareji_safe_autopilot_v0` profile keeps these semantics stable so customization cannot silently change the default safety behavior.
