@@ -529,6 +529,21 @@ pub struct WorkItemSummary {
     pub required_capabilities: Vec<String>,
 }
 
+/// Explicit human intent to create one Board-owned Work item without a Checkpoint.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WorkItemCreateRequest {
+    pub project_id: String,
+    pub work_item_id: String,
+    pub title: String,
+    pub priority: u32,
+}
+
+/// Durable result of one direct Work item creation attempt.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WorkItemCreateReceipt {
+    pub work_item: WorkItemSummary,
+}
+
 /// Board-owned agent role available for Work item assignment.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AgentProfileSummary {

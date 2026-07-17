@@ -14,7 +14,8 @@ use gareji_board_domain::{
     ExecutionWorkspaceKind, ExecutionWorkspaceSaveReceipt, ExecutionWorkspaceSaveRequest,
     PortfolioSnapshot, ProjectCreateReceipt, ProjectCreateRequest, ProjectHealth, ProjectSummary,
     ReconciliationDecision, ReconciliationReceipt, ReconciliationRequest, WorkItemCounts,
-    WorkItemState, WorkItemSummary, WorkItemTransitionReceipt, WorkItemTransitionRequest,
+    WorkItemCreateReceipt, WorkItemCreateRequest, WorkItemState, WorkItemSummary,
+    WorkItemTransitionReceipt, WorkItemTransitionRequest,
 };
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params, params_from_iter};
 use thiserror::Error;
@@ -781,6 +782,76 @@ impl SqliteBoardStore {
             previous,
             resulting: target,
             changed: true,
+        })
+    }
+
+    /// Create one direct Board-owned Work item with safe scheduling defaults.
+    ///
+    /// # Errors
+    ///
+    /// Returns a bounded validation, lookup, duplicate-item, storage, or corrupt-state error.
+    pub fn create_work_item(
+        &mut self,
+        request: &WorkItemCreateRequest,
+    ) -> Result<WorkItemCreateReceipt, StoreError> {
+        validate_id(&request.project_id)?;
+        validate_id(&request.work_item_id)?;
+        validate_title(&request.title)?;
+        if request.title.trim() != request.title || request.priority == 0 {
+            return Err(StoreError::InvalidRequest);
+        }
+
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(StoreError::Sqlite)?;
+        let project_exists: bool = transaction
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM board_projects WHERE id = ?1)",
+                [&request.project_id],
+                |row| row.get(0),
+            )
+            .map_err(StoreError::Sqlite)?;
+        if !project_exists {
+            return Err(StoreError::ProjectNotFound);
+        }
+        let work_item_exists: bool = transaction
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM board_work_items WHERE id = ?1)",
+                [&request.work_item_id],
+                |row| row.get(0),
+            )
+            .map_err(StoreError::Sqlite)?;
+        if work_item_exists {
+            return Err(StoreError::WorkItemAlreadyExists);
+        }
+        transaction
+            .execute(
+                "INSERT INTO board_work_items (id, project_id, title, priority, state)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    request.work_item_id,
+                    request.project_id,
+                    request.title,
+                    request.priority,
+                    WorkItemState::Todo.as_str()
+                ],
+            )
+            .map_err(StoreError::Sqlite)?;
+        transaction.commit().map_err(StoreError::Sqlite)?;
+
+        Ok(WorkItemCreateReceipt {
+            work_item: WorkItemSummary {
+                id: request.work_item_id.clone(),
+                project_id: request.project_id.clone(),
+                title: request.title.clone(),
+                priority: request.priority,
+                state: WorkItemState::Todo,
+                approval_requirement: ApprovalRequirement::None,
+                dependency_ids: Vec::new(),
+                agent_profile_id: None,
+                required_capabilities: Vec::new(),
+            },
         })
     }
 
@@ -2265,6 +2336,49 @@ mod tests {
         ));
         assert!(store.load_portfolio().unwrap().projects.is_empty());
         assert!(store.load_execution_workspaces().unwrap().is_empty());
+    }
+
+    #[test]
+    fn direct_work_item_creation_uses_safe_defaults_and_rejects_duplicates() {
+        let mut store = SqliteBoardStore::open_in_memory().unwrap();
+        store.seed_sample_if_empty().unwrap();
+        let request = WorkItemCreateRequest {
+            project_id: "gareji-core".to_owned(),
+            work_item_id: "CORE-3".to_owned(),
+            title: "Connect an existing project".to_owned(),
+            priority: 3,
+        };
+
+        let receipt = store.create_work_item(&request).unwrap();
+        assert_eq!(receipt.work_item.id, "CORE-3");
+        assert_eq!(receipt.work_item.project_id, "gareji-core");
+        assert_eq!(receipt.work_item.state, WorkItemState::Todo);
+        assert_eq!(receipt.work_item.priority, 3);
+        assert_eq!(
+            receipt.work_item.approval_requirement,
+            ApprovalRequirement::None
+        );
+        assert!(receipt.work_item.dependency_ids.is_empty());
+        assert!(receipt.work_item.agent_profile_id.is_none());
+        assert!(receipt.work_item.required_capabilities.is_empty());
+        assert!(
+            store
+                .load_work_items()
+                .unwrap()
+                .contains(&receipt.work_item)
+        );
+
+        assert!(matches!(
+            store.create_work_item(&request),
+            Err(StoreError::WorkItemAlreadyExists)
+        ));
+        assert!(matches!(
+            store.create_work_item(&WorkItemCreateRequest {
+                priority: 0,
+                ..request
+            }),
+            Err(StoreError::InvalidRequest)
+        ));
     }
 
     #[test]

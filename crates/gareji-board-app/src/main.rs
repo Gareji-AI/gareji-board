@@ -12,7 +12,8 @@ use gareji_board_domain::{
     ExecutionWorkspaceSaveRequest, NoCandidateReason, PortfolioSnapshot, ProgressActivity,
     ProjectCreateReceipt, ProjectCreateRequest, ProjectHealth, ReconciliationDecision,
     ReconciliationReceipt, ReconciliationRequest, SafeAutopilotOutcome, SafeAutopilotPreview,
-    WorkItemState, WorkItemSummary, WorkItemTransitionReceipt, WorkItemTransitionRequest,
+    WorkItemCreateReceipt, WorkItemCreateRequest, WorkItemState, WorkItemSummary,
+    WorkItemTransitionReceipt, WorkItemTransitionRequest,
 };
 use gareji_board_store::{SqliteBoardStore, default_board_database_path};
 
@@ -60,6 +61,7 @@ struct AppState {
     agent_profile_notice: Option<String>,
     execution_workspace_notice: Option<String>,
     project_notice: Option<String>,
+    work_item_creation_notice: Option<String>,
     autopilot_preview: Option<SafeAutopilotPreview>,
 }
 
@@ -80,6 +82,14 @@ struct NewProjectSignals {
     workspace_location: Signal<String>,
 }
 
+#[derive(Clone, Copy)]
+struct NewWorkItemSignals {
+    project_id: Signal<String>,
+    work_item_id: Signal<String>,
+    title: Signal<String>,
+    priority: Signal<String>,
+}
+
 fn use_new_agent_profile_signals() -> NewAgentProfileSignals {
     NewAgentProfileSignals {
         profile_id: use_signal(String::new),
@@ -96,6 +106,15 @@ fn use_new_project_signals() -> NewProjectSignals {
         name: use_signal(String::new),
         execution_cap: use_signal(|| "1".to_owned()),
         workspace_location: use_signal(String::new),
+    }
+}
+
+fn use_new_work_item_signals() -> NewWorkItemSignals {
+    NewWorkItemSignals {
+        project_id: use_signal(String::new),
+        work_item_id: use_signal(String::new),
+        title: use_signal(String::new),
+        priority: use_signal(|| "100".to_owned()),
     }
 }
 
@@ -157,6 +176,7 @@ fn load_app_state() -> AppState {
                 agent_profile_notice: None,
                 execution_workspace_notice: None,
                 project_notice: None,
+                work_item_creation_notice: None,
                 autopilot_preview: None,
             }
         }
@@ -176,6 +196,7 @@ fn load_app_state() -> AppState {
             agent_profile_notice: None,
             execution_workspace_notice: None,
             project_notice: None,
+            work_item_creation_notice: None,
             autopilot_preview: None,
         },
     }
@@ -232,6 +253,12 @@ fn save_execution_workspace(
 fn create_project(request: &ProjectCreateRequest) -> Result<ProjectCreateReceipt, String> {
     SqliteBoardStore::open(board_database_path())
         .and_then(|mut store| store.create_project(request))
+        .map_err(|error| error.to_string())
+}
+
+fn create_work_item(request: &WorkItemCreateRequest) -> Result<WorkItemCreateReceipt, String> {
+    SqliteBoardStore::open(board_database_path())
+        .and_then(|mut store| store.create_work_item(request))
         .map_err(|error| error.to_string())
 }
 
@@ -356,11 +383,30 @@ fn handle_project_creation(
     }
 }
 
-#[allow(non_snake_case)]
+fn handle_work_item_creation(
+    mut state: Signal<AppState>,
+    mut form: NewWorkItemSignals,
+    request: &WorkItemCreateRequest,
+) {
+    match create_work_item(request) {
+        Ok(receipt) => {
+            form.work_item_id.set(String::new());
+            form.title.set(String::new());
+            form.priority.set("100".to_owned());
+            let mut reloaded = load_app_state();
+            reloaded.work_item_creation_notice = Some(work_item_creation_message(&receipt));
+            state.set(reloaded);
+        }
+        Err(error) => state.write().work_item_creation_notice = Some(error),
+    }
+}
+
+#[allow(clippy::too_many_lines, non_snake_case)]
 fn App() -> Element {
     let mut state = use_signal(load_app_state);
     let new_profile_form = use_new_agent_profile_signals();
     let new_project_form = use_new_project_signals();
+    let new_work_item_form = use_new_work_item_signals();
     let snapshot = state.read().clone();
     let project_count = snapshot.portfolio.projects.len();
     let active_runs = snapshot.portfolio.active_runs();
@@ -387,6 +433,9 @@ fn App() -> Element {
     };
     let on_project_create = move |request| {
         handle_project_creation(state, new_project_form, request);
+    };
+    let on_work_item_create = move |request| {
+        handle_work_item_creation(state, new_work_item_form, &request);
     };
     let action_notices = action_notices(&snapshot);
 
@@ -449,8 +498,14 @@ fn App() -> Element {
             WorkItemControl {
                 work_items: snapshot.work_items.clone(),
                 agent_profiles: snapshot.agent_profiles.clone(),
+                portfolio: snapshot.portfolio.clone(),
                 on_transition,
                 on_agent_plan,
+                new_work_item_project_id: new_work_item_form.project_id,
+                new_work_item_id: new_work_item_form.work_item_id,
+                new_work_item_title: new_work_item_form.title,
+                new_work_item_priority: new_work_item_form.priority,
+                on_create: on_work_item_create,
             }
 
             ProjectGrid {
@@ -490,6 +545,7 @@ fn action_notices(snapshot: &AppState) -> Vec<String> {
         snapshot.agent_profile_notice.clone(),
         snapshot.execution_workspace_notice.clone(),
         snapshot.project_notice.clone(),
+        snapshot.work_item_creation_notice.clone(),
     ]
     .into_iter()
     .flatten()
@@ -1320,12 +1376,18 @@ fn AgentSkillInput(value: String, on_change: EventHandler<String>) -> Element {
 fn WorkItemControl(
     work_items: Vec<WorkItemSummary>,
     agent_profiles: Vec<AgentProfileSummary>,
+    portfolio: PortfolioSnapshot,
     on_transition: EventHandler<WorkItemTransitionRequest>,
     on_agent_plan: EventHandler<AgentPlanUpdateRequest>,
+    new_work_item_project_id: Signal<String>,
+    new_work_item_id: Signal<String>,
+    new_work_item_title: Signal<String>,
+    new_work_item_priority: Signal<String>,
+    on_create: EventHandler<WorkItemCreateRequest>,
 ) -> Element {
     let work_item_count = work_items.len();
     let capability_catalog = agent_capability_catalog(&agent_profiles, &work_items);
-    let lanes = group_work_items_by_state(work_items);
+    let lanes = group_work_items_by_state(work_items.clone());
     rsx! {
         section { class: "section-heading",
             div {
@@ -1335,10 +1397,20 @@ fn WorkItemControl(
             span { "{work_item_count} total" }
         }
 
+        NewWorkItemForm {
+            portfolio: portfolio.clone(),
+            existing_work_items: work_items.clone(),
+            project_id: new_work_item_project_id,
+            work_item_id: new_work_item_id,
+            title: new_work_item_title,
+            priority: new_work_item_priority,
+            on_create,
+        }
+
         if work_item_count == 0 {
             section { class: "empty-work-items",
                 strong { "No Work items yet" }
-                p { "Create one from an Activity Inbox Checkpoint to begin." }
+                p { "Add a direct Work item or create one from an Activity Inbox Checkpoint." }
             }
         } else {
             section { class: "kanban-board", aria_label: "Work item Kanban board",
@@ -1352,6 +1424,112 @@ fn WorkItemControl(
                         on_transition,
                         on_agent_plan,
                     }
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn NewWorkItemForm(
+    portfolio: PortfolioSnapshot,
+    existing_work_items: Vec<WorkItemSummary>,
+    mut project_id: Signal<String>,
+    mut work_item_id: Signal<String>,
+    mut title: Signal<String>,
+    mut priority: Signal<String>,
+    on_create: EventHandler<WorkItemCreateRequest>,
+) -> Element {
+    let project_id_value = project_id.read().clone();
+    let work_item_id_value = work_item_id.read().clone();
+    let title_value = title.read().clone();
+    let priority_value = priority.read().clone();
+    let selected_project_id = if project_id_value.is_empty() {
+        portfolio
+            .projects
+            .first()
+            .map(|project| project.id.clone())
+            .unwrap_or_default()
+    } else {
+        project_id_value.clone()
+    };
+    let duplicate_id = existing_work_items
+        .iter()
+        .any(|work_item| work_item.id == work_item_id_value);
+    let parsed_priority = parse_work_item_priority(&priority_value);
+    let can_create = !selected_project_id.is_empty()
+        && work_item_id_is_valid(&work_item_id_value)
+        && work_item_title_is_valid(&title_value)
+        && parsed_priority.is_some()
+        && !duplicate_id;
+    rsx! {
+        details { class: "new-work-item",
+            summary { "Add Work item" }
+            div { class: "work-item-create-form",
+                label {
+                    span { "Project" }
+                    select {
+                        aria_label: "New Work item project",
+                        value: "{selected_project_id}",
+                        onchange: move |event| project_id.set(event.value()),
+                        for project in &portfolio.projects {
+                            option {
+                                value: "{project.id}",
+                                selected: selected_project_id == project.id,
+                                "{project.name} · {project.id}"
+                            }
+                        }
+                    }
+                }
+                label {
+                    span { "Work item ID" }
+                    input {
+                        aria_label: "New Work item ID",
+                        value: "{work_item_id_value}",
+                        maxlength: 128,
+                        placeholder: "PRODUCT-1",
+                        oninput: move |event| work_item_id.set(event.value()),
+                    }
+                }
+                label {
+                    span { "Title" }
+                    input {
+                        aria_label: "New Work item title",
+                        value: "{title_value}",
+                        maxlength: 256,
+                        placeholder: "Describe the next outcome",
+                        oninput: move |event| title.set(event.value()),
+                    }
+                }
+                label {
+                    span { "Priority" }
+                    input {
+                        aria_label: "New Work item priority",
+                        r#type: "number",
+                        min: "1",
+                        max: "4294967295",
+                        value: "{priority_value}",
+                        oninput: move |event| priority.set(event.value()),
+                    }
+                    small { "Lower values are selected first. New items start in todo." }
+                }
+                if duplicate_id {
+                    p { class: "field-warning", "That Work item ID already exists." }
+                }
+                button {
+                    class: "work-item-create-action",
+                    disabled: !can_create,
+                    onclick: move |_| {
+                        if let Some(priority) = parsed_priority {
+                            on_create.call(WorkItemCreateRequest {
+                                project_id: selected_project_id.clone(),
+                                work_item_id: work_item_id_value.clone(),
+                                title: title_value.trim().to_owned(),
+                                priority,
+                            });
+                        }
+                    },
+                    "Add Work item"
                 }
             }
         }
@@ -1858,6 +2036,23 @@ fn parse_project_execution_cap(value: &str) -> Option<u32> {
     value.trim().parse::<u32>().ok().filter(|value| *value > 0)
 }
 
+fn work_item_id_is_valid(value: &str) -> bool {
+    let length = value.chars().count();
+    !value.trim().is_empty()
+        && value.trim() == value
+        && length <= 128
+        && !value.chars().any(char::is_control)
+}
+
+fn work_item_title_is_valid(value: &str) -> bool {
+    let trimmed = value.trim();
+    !trimmed.is_empty() && trimmed == value && trimmed.chars().count() <= 256
+}
+
+fn parse_work_item_priority(value: &str) -> Option<u32> {
+    value.trim().parse::<u32>().ok().filter(|value| *value > 0)
+}
+
 fn agent_role_is_valid(value: &str) -> bool {
     let trimmed = value.trim();
     !trimmed.is_empty() && trimmed.chars().count() <= 128
@@ -2074,6 +2269,13 @@ fn project_message(receipt: &ProjectCreateReceipt) -> String {
     )
 }
 
+fn work_item_creation_message(receipt: &WorkItemCreateReceipt) -> String {
+    format!(
+        "Work item {} added to {} in todo.",
+        receipt.work_item.id, receipt.work_item.project_id
+    )
+}
+
 fn execution_workspace_label(connection: Option<&ExecutionWorkspaceConnection>) -> String {
     match connection {
         Some(ExecutionWorkspaceConnection {
@@ -2165,6 +2367,16 @@ mod tests {
         assert_eq!(parse_project_execution_cap("2"), Some(2));
         assert_eq!(parse_project_execution_cap("0"), None);
         assert_eq!(parse_project_execution_cap("not-a-number"), None);
+    }
+
+    #[test]
+    fn work_item_form_requires_trimmed_identity_title_and_positive_priority() {
+        assert!(work_item_id_is_valid("PROJECT-1"));
+        assert!(!work_item_id_is_valid(" PROJECT-1"));
+        assert!(work_item_title_is_valid("Describe the next outcome"));
+        assert!(!work_item_title_is_valid("Describe the next outcome "));
+        assert_eq!(parse_work_item_priority("4"), Some(4));
+        assert_eq!(parse_work_item_priority("0"), None);
     }
 
     #[test]
