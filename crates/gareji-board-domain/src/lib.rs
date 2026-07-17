@@ -164,6 +164,126 @@ pub struct ActiveWorkAssessment {
     pub eligibility: ActiveWorkEligibility,
 }
 
+/// Capture origin presented in the Activity timeline.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CheckpointSource {
+    Runner,
+    Mcp,
+    ManualCli,
+    CodexStopHook,
+    GitPostCommit,
+}
+
+impl CheckpointSource {
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Runner => "Runner",
+            Self::Mcp => "MCP",
+            Self::ManualCli => "Manual",
+            Self::CodexStopHook => "Codex",
+            Self::GitPostCommit => "Git",
+        }
+    }
+}
+
+/// Progress outcome presented independently from Work item state.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CheckpointOutcome {
+    Progress,
+    Completed,
+    NeedsReview,
+    Blocked,
+    Failed,
+    NoAction,
+}
+
+impl CheckpointOutcome {
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Progress => "Progress",
+            Self::Completed => "Completed",
+            Self::NeedsReview => "Needs review",
+            Self::Blocked => "Blocked",
+            Self::Failed => "Failed",
+            Self::NoAction => "No action",
+        }
+    }
+}
+
+/// Current projection result for one Progress Checkpoint destination.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CheckpointDeliveryStatus {
+    Pending,
+    Synced,
+    Conflict,
+    Failed,
+}
+
+impl CheckpointDeliveryStatus {
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Pending => "Pending",
+            Self::Synced => "Synced",
+            Self::Conflict => "Conflict",
+            Self::Failed => "Failed",
+        }
+    }
+
+    #[must_use]
+    pub const fn needs_attention(self) -> bool {
+        matches!(self, Self::Conflict | Self::Failed)
+    }
+}
+
+/// One destination result shown with a Progress Checkpoint.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CheckpointDelivery {
+    pub destination_id: String,
+    pub status: CheckpointDeliveryStatus,
+    pub attempts: u32,
+    pub last_error: Option<String>,
+}
+
+/// One accepted Core checkpoint adapted for Board presentation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProgressActivity {
+    pub checkpoint_id: String,
+    pub recorded_at: String,
+    pub project_id: String,
+    pub work_item_id: Option<String>,
+    pub source: CheckpointSource,
+    pub outcome: CheckpointOutcome,
+    pub summary: String,
+    pub recommended_state: Option<WorkItemState>,
+    pub deliveries: Vec<CheckpointDelivery>,
+}
+
+/// Bounded Board read model derived from Core-owned Progress Checkpoints.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ActivityTimeline {
+    pub activities: Vec<ProgressActivity>,
+    pub has_older: bool,
+}
+
+impl ActivityTimeline {
+    #[must_use]
+    pub fn delivery_issues(&self) -> u32 {
+        self.activities
+            .iter()
+            .flat_map(|activity| &activity.deliveries)
+            .filter(|delivery| delivery.status.needs_attention())
+            .count()
+            .try_into()
+            .unwrap_or(u32::MAX)
+    }
+}
+
 /// Counts needed by the portfolio screen without exposing storage rows.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct WorkItemCounts {
@@ -265,5 +385,38 @@ mod tests {
                 }
             );
         }
+    }
+
+    #[test]
+    fn activity_timeline_counts_delivery_issues_only() {
+        let timeline = ActivityTimeline {
+            activities: vec![ProgressActivity {
+                checkpoint_id: "cp-1".to_owned(),
+                recorded_at: "2026-07-17T12:00:00+09:00".to_owned(),
+                project_id: "core".to_owned(),
+                work_item_id: Some("CORE-1".to_owned()),
+                source: CheckpointSource::Runner,
+                outcome: CheckpointOutcome::Progress,
+                summary: "Made progress".to_owned(),
+                recommended_state: None,
+                deliveries: vec![
+                    CheckpointDelivery {
+                        destination_id: "notes".to_owned(),
+                        status: CheckpointDeliveryStatus::Synced,
+                        attempts: 1,
+                        last_error: None,
+                    },
+                    CheckpointDelivery {
+                        destination_id: "wiki".to_owned(),
+                        status: CheckpointDeliveryStatus::Failed,
+                        attempts: 1,
+                        last_error: Some("unavailable".to_owned()),
+                    },
+                ],
+            }],
+            has_older: false,
+        };
+
+        assert_eq!(timeline.delivery_issues(), 1);
     }
 }
