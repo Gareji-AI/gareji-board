@@ -537,6 +537,21 @@ pub struct AgentProfileSummary {
     pub capabilities: Vec<String>,
 }
 
+/// Explicit human intent to create or replace one Board-owned Agent profile.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AgentProfileSaveRequest {
+    pub expected: Option<AgentProfileSummary>,
+    pub target: AgentProfileSummary,
+}
+
+/// Durable result of one explicit Agent profile save attempt.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AgentProfileSaveReceipt {
+    pub previous: Option<AgentProfileSummary>,
+    pub resulting: AgentProfileSummary,
+    pub changed: bool,
+}
+
 /// Board-owned scheduling intent for one Work item.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct AgentPlan {

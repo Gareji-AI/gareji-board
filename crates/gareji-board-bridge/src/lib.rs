@@ -139,6 +139,7 @@ fn map_store_error(request_id: String, error: &StoreError) -> BoardBridgeRespons
         ),
         StoreError::CheckpointAlreadyLinked
         | StoreError::AgentProfileNotFound
+        | StoreError::AgentProfileAlreadyExists
         | StoreError::WorkItemAlreadyExists
         | StoreError::AlreadyAttached
         | StoreError::AlreadyReconciled

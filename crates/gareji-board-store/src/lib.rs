@@ -8,11 +8,12 @@ use std::time::Duration;
 use directories::ProjectDirs;
 use gareji_board_domain::{
     ActiveWorkAssessment, ActivityTimeline, AgentPlan, AgentPlanUpdateReceipt,
-    AgentPlanUpdateRequest, AgentProfileSummary, ApprovalRequirement, AttachmentReceipt,
-    AttachmentRequest, AttachmentTarget, CheckpointAttachment, CheckpointReconciliation,
-    PortfolioSnapshot, ProjectHealth, ProjectSummary, ReconciliationDecision,
-    ReconciliationReceipt, ReconciliationRequest, WorkItemCounts, WorkItemState, WorkItemSummary,
-    WorkItemTransitionReceipt, WorkItemTransitionRequest,
+    AgentPlanUpdateRequest, AgentProfileSaveReceipt, AgentProfileSaveRequest, AgentProfileSummary,
+    ApprovalRequirement, AttachmentReceipt, AttachmentRequest, AttachmentTarget,
+    CheckpointAttachment, CheckpointReconciliation, PortfolioSnapshot, ProjectHealth,
+    ProjectSummary, ReconciliationDecision, ReconciliationReceipt, ReconciliationRequest,
+    WorkItemCounts, WorkItemState, WorkItemSummary, WorkItemTransitionReceipt,
+    WorkItemTransitionRequest,
 };
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params, params_from_iter};
 use thiserror::Error;
@@ -281,6 +282,93 @@ impl SqliteBoardStore {
             profiles[index].capabilities.push(capability);
         }
         Ok(profiles)
+    }
+
+    /// Create or atomically replace one Board-owned Agent profile.
+    ///
+    /// # Errors
+    ///
+    /// Returns a bounded validation, lookup, concurrent-change, storage, or
+    /// corrupt-state error. Saving the stored profile is a successful no-op.
+    pub fn save_agent_profile(
+        &mut self,
+        request: &AgentProfileSaveRequest,
+    ) -> Result<AgentProfileSaveReceipt, StoreError> {
+        let expected = request
+            .expected
+            .as_ref()
+            .map(canonical_agent_profile)
+            .transpose()?;
+        let target = canonical_agent_profile(&request.target)?;
+        if expected
+            .as_ref()
+            .is_some_and(|profile| profile.id != target.id)
+        {
+            return Err(StoreError::InvalidRequest);
+        }
+
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(StoreError::Sqlite)?;
+        let stored = load_agent_profile(&transaction, &target.id)?;
+        match (&expected, &stored) {
+            (None, Some(_)) => return Err(StoreError::AgentProfileAlreadyExists),
+            (Some(_), None) => return Err(StoreError::AgentProfileNotFound),
+            (Some(observed), Some(current)) if observed != current => {
+                return Err(StoreError::ConcurrentChange);
+            }
+            _ => {}
+        }
+        if stored.as_ref() == Some(&target) {
+            return Ok(AgentProfileSaveReceipt {
+                previous: stored,
+                resulting: target,
+                changed: false,
+            });
+        }
+
+        if stored.is_none() {
+            transaction
+                .execute(
+                    "INSERT INTO board_agent_profiles (id, role) VALUES (?1, ?2)",
+                    params![target.id, target.role],
+                )
+                .map_err(StoreError::Sqlite)?;
+        } else {
+            let changed = transaction
+                .execute(
+                    "UPDATE board_agent_profiles SET role = ?1 WHERE id = ?2",
+                    params![target.role, target.id],
+                )
+                .map_err(StoreError::Sqlite)?;
+            if changed != 1 {
+                return Err(StoreError::ConcurrentChange);
+            }
+            transaction
+                .execute(
+                    "DELETE FROM board_agent_profile_capabilities
+                     WHERE agent_profile_id = ?1",
+                    [&target.id],
+                )
+                .map_err(StoreError::Sqlite)?;
+        }
+        for capability in &target.capabilities {
+            transaction
+                .execute(
+                    "INSERT INTO board_agent_profile_capabilities
+                       (agent_profile_id, capability)
+                     VALUES (?1, ?2)",
+                    params![target.id, capability],
+                )
+                .map_err(StoreError::Sqlite)?;
+        }
+        transaction.commit().map_err(StoreError::Sqlite)?;
+        Ok(AgentProfileSaveReceipt {
+            previous: stored,
+            resulting: target,
+            changed: true,
+        })
     }
 
     /// Load existing Work items available to the Activity Inbox.
@@ -1207,6 +1295,44 @@ fn load_required_capabilities(
         .map_err(StoreError::Sqlite)
 }
 
+fn load_agent_profile(
+    connection: &Connection,
+    agent_profile_id: &str,
+) -> Result<Option<AgentProfileSummary>, StoreError> {
+    let Some(mut profile) = connection
+        .query_row(
+            "SELECT id, role FROM board_agent_profiles WHERE id = ?1",
+            [agent_profile_id],
+            |row| {
+                Ok(AgentProfileSummary {
+                    id: row.get(0)?,
+                    role: row.get(1)?,
+                    capabilities: Vec::new(),
+                })
+            },
+        )
+        .optional()
+        .map_err(StoreError::Sqlite)?
+    else {
+        return Ok(None);
+    };
+    let mut statement = connection
+        .prepare(
+            "SELECT capability
+             FROM board_agent_profile_capabilities
+             WHERE agent_profile_id = ?1
+             ORDER BY capability",
+        )
+        .map_err(StoreError::Sqlite)?;
+    let capabilities = statement
+        .query_map([agent_profile_id], |row| row.get::<_, String>(0))
+        .map_err(StoreError::Sqlite)?;
+    profile.capabilities = capabilities
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(StoreError::Sqlite)?;
+    Ok(Some(profile))
+}
+
 struct StoredAttachment {
     checkpoint_id: String,
     project_id: String,
@@ -1372,6 +1498,53 @@ fn validate_title(value: &str) -> Result<(), StoreError> {
     Ok(())
 }
 
+fn canonical_agent_profile(
+    profile: &AgentProfileSummary,
+) -> Result<AgentProfileSummary, StoreError> {
+    validate_agent_profile_id(&profile.id)?;
+    validate_agent_role(&profile.role)?;
+    let mut capabilities = profile.capabilities.clone();
+    for capability in &capabilities {
+        validate_capability(capability)?;
+    }
+    capabilities.sort();
+    capabilities.dedup();
+    Ok(AgentProfileSummary {
+        id: profile.id.clone(),
+        role: profile.role.clone(),
+        capabilities,
+    })
+}
+
+fn validate_agent_profile_id(value: &str) -> Result<(), StoreError> {
+    let length = value.chars().count();
+    let mut characters = value.chars();
+    let Some(first) = characters.next() else {
+        return Err(StoreError::InvalidRequest);
+    };
+    let last = value.chars().next_back().unwrap_or(first);
+    if length > 64
+        || !first.is_ascii_lowercase()
+        || !last.is_ascii_alphanumeric()
+        || !value.chars().all(|character| {
+            character.is_ascii_lowercase()
+                || character.is_ascii_digit()
+                || matches!(character, '-' | '_')
+        })
+    {
+        return Err(StoreError::InvalidRequest);
+    }
+    Ok(())
+}
+
+fn validate_agent_role(value: &str) -> Result<(), StoreError> {
+    let length = value.chars().count();
+    if length == 0 || length > 128 || value.trim() != value {
+        return Err(StoreError::InvalidRequest);
+    }
+    Ok(())
+}
+
 fn canonical_agent_plan(plan: &AgentPlan) -> Result<AgentPlan, StoreError> {
     if let Some(agent_profile_id) = &plan.agent_profile_id {
         validate_id(agent_profile_id)?;
@@ -1406,6 +1579,8 @@ pub enum StoreError {
     WorkItemNotFound,
     #[error("Agent profile was not found")]
     AgentProfileNotFound,
+    #[error("an Agent profile with this ID already exists")]
+    AgentProfileAlreadyExists,
     #[error("a Work item with this ID already exists")]
     WorkItemAlreadyExists,
     #[error("this Checkpoint already has a Work item link")]
@@ -1416,7 +1591,7 @@ pub enum StoreError {
     AlreadyReconciled,
     #[error("the recommended Work item transition requires a separate explicit action")]
     UnsupportedReconciliation,
-    #[error("the Work item changed before the operation was applied")]
+    #[error("the Board record changed before the operation was applied")]
     ConcurrentChange,
     #[error("could not create the Board data directory")]
     CreateDirectory(#[source] std::io::Error),
@@ -1566,6 +1741,104 @@ mod tests {
                 target: current,
             }),
             Err(StoreError::WorkItemNotFound)
+        ));
+    }
+
+    #[test]
+    fn agent_profile_save_creates_updates_and_rejects_stale_observations() {
+        let mut store = SqliteBoardStore::open_in_memory().unwrap();
+        store.seed_sample_if_empty().unwrap();
+        let create = AgentProfileSaveRequest {
+            expected: None,
+            target: AgentProfileSummary {
+                id: "qa-specialist".to_owned(),
+                role: "QA specialist".to_owned(),
+                capabilities: vec![
+                    "testing".to_owned(),
+                    "evidence".to_owned(),
+                    "testing".to_owned(),
+                ],
+            },
+        };
+
+        let created = store.save_agent_profile(&create).unwrap();
+        assert!(created.changed);
+        assert_eq!(created.previous, None);
+        assert_eq!(
+            created.resulting.capabilities,
+            vec!["evidence".to_owned(), "testing".to_owned()]
+        );
+        let unchanged = store
+            .save_agent_profile(&AgentProfileSaveRequest {
+                expected: Some(created.resulting.clone()),
+                target: created.resulting.clone(),
+            })
+            .unwrap();
+        assert!(!unchanged.changed);
+
+        let edited_target = AgentProfileSummary {
+            role: "Quality reviewer".to_owned(),
+            capabilities: vec!["review".to_owned(), "testing".to_owned()],
+            ..created.resulting.clone()
+        };
+        let edited = store
+            .save_agent_profile(&AgentProfileSaveRequest {
+                expected: Some(created.resulting.clone()),
+                target: edited_target.clone(),
+            })
+            .unwrap();
+        assert!(edited.changed);
+        assert_eq!(edited.resulting, edited_target);
+        assert!(matches!(
+            store.save_agent_profile(&AgentProfileSaveRequest {
+                expected: Some(created.resulting),
+                target: AgentProfileSummary {
+                    role: "Stale edit".to_owned(),
+                    ..edited_target
+                },
+            }),
+            Err(StoreError::ConcurrentChange)
+        ));
+    }
+
+    #[test]
+    fn agent_profile_save_preserves_stable_identity_and_unique_creation() {
+        let mut store = SqliteBoardStore::open_in_memory().unwrap();
+        store.seed_sample_if_empty().unwrap();
+        let existing = store
+            .load_agent_profiles()
+            .unwrap()
+            .into_iter()
+            .find(|profile| profile.id == "implementer")
+            .unwrap();
+
+        assert!(matches!(
+            store.save_agent_profile(&AgentProfileSaveRequest {
+                expected: None,
+                target: existing.clone(),
+            }),
+            Err(StoreError::AgentProfileAlreadyExists)
+        ));
+        assert!(matches!(
+            store.save_agent_profile(&AgentProfileSaveRequest {
+                expected: Some(existing.clone()),
+                target: AgentProfileSummary {
+                    id: "renamed".to_owned(),
+                    ..existing.clone()
+                },
+            }),
+            Err(StoreError::InvalidRequest)
+        ));
+        assert!(matches!(
+            store.save_agent_profile(&AgentProfileSaveRequest {
+                expected: None,
+                target: AgentProfileSummary {
+                    id: "Invalid ID".to_owned(),
+                    role: "Invalid".to_owned(),
+                    capabilities: Vec::new(),
+                },
+            }),
+            Err(StoreError::InvalidRequest)
         ));
     }
 

@@ -5,12 +5,12 @@ use dioxus::prelude::*;
 use gareji_board_core::CoreProgressReader;
 use gareji_board_domain::{
     ActivityTimeline, AgentPlan, AgentPlanUpdateReceipt, AgentPlanUpdateRequest,
-    AgentProfileSummary, ApprovalRequirement, AttachmentReceipt, AttachmentRequest,
-    AttachmentTarget, AutopilotStopReason, CandidateSkipReason, CheckpointDeliveryStatus,
-    CheckpointOutcome, CheckpointReconciliation, NoCandidateReason, PortfolioSnapshot,
-    ProgressActivity, ProjectHealth, ReconciliationDecision, ReconciliationReceipt,
-    ReconciliationRequest, SafeAutopilotOutcome, SafeAutopilotPreview, WorkItemState,
-    WorkItemSummary, WorkItemTransitionReceipt, WorkItemTransitionRequest,
+    AgentProfileSaveReceipt, AgentProfileSaveRequest, AgentProfileSummary, ApprovalRequirement,
+    AttachmentReceipt, AttachmentRequest, AttachmentTarget, AutopilotStopReason,
+    CandidateSkipReason, CheckpointDeliveryStatus, CheckpointOutcome, CheckpointReconciliation,
+    NoCandidateReason, PortfolioSnapshot, ProgressActivity, ProjectHealth, ReconciliationDecision,
+    ReconciliationReceipt, ReconciliationRequest, SafeAutopilotOutcome, SafeAutopilotPreview,
+    WorkItemState, WorkItemSummary, WorkItemTransitionReceipt, WorkItemTransitionRequest,
 };
 use gareji_board_store::{SqliteBoardStore, default_board_database_path};
 
@@ -43,8 +43,11 @@ struct AppState {
     attachment_notice: Option<String>,
     transition_notice: Option<String>,
     agent_plan_notice: Option<String>,
+    agent_profile_notice: Option<String>,
     autopilot_preview: Option<SafeAutopilotPreview>,
 }
+
+type NewAgentProfileSignals = (Signal<String>, Signal<String>, Signal<String>);
 
 fn load_app_state() -> AppState {
     let database_path = board_database_path();
@@ -93,6 +96,7 @@ fn load_app_state() -> AppState {
                 attachment_notice: None,
                 transition_notice: None,
                 agent_plan_notice: None,
+                agent_profile_notice: None,
                 autopilot_preview: None,
             }
         }
@@ -108,6 +112,7 @@ fn load_app_state() -> AppState {
             attachment_notice: None,
             transition_notice: None,
             agent_plan_notice: None,
+            agent_profile_notice: None,
             autopilot_preview: None,
         },
     }
@@ -142,6 +147,14 @@ fn transition_work_item(
 fn update_agent_plan(request: &AgentPlanUpdateRequest) -> Result<AgentPlanUpdateReceipt, String> {
     SqliteBoardStore::open(board_database_path())
         .and_then(|mut store| store.update_agent_plan(request))
+        .map_err(|error| error.to_string())
+}
+
+fn save_agent_profile(
+    request: &AgentProfileSaveRequest,
+) -> Result<AgentProfileSaveReceipt, String> {
+    SqliteBoardStore::open(board_database_path())
+        .and_then(|mut store| store.save_agent_profile(request))
         .map_err(|error| error.to_string())
 }
 
@@ -189,9 +202,33 @@ fn handle_agent_plan(mut state: Signal<AppState>, request: &AgentPlanUpdateReque
     }
 }
 
+fn handle_agent_profile(
+    mut state: Signal<AppState>,
+    mut form: NewAgentProfileSignals,
+    request: &AgentProfileSaveRequest,
+) {
+    match save_agent_profile(request) {
+        Ok(receipt) => {
+            if receipt.previous.is_none() {
+                form.0.set(String::new());
+                form.1.set(String::new());
+                form.2.set(String::new());
+            }
+            let mut reloaded = load_app_state();
+            reloaded.agent_profile_notice = Some(agent_profile_message(&receipt));
+            state.set(reloaded);
+        }
+        Err(error) => state.write().agent_profile_notice = Some(error),
+    }
+}
+
 #[allow(non_snake_case)]
 fn App() -> Element {
     let mut state = use_signal(load_app_state);
+    let new_profile_id = use_signal(String::new);
+    let new_profile_role = use_signal(String::new);
+    let new_profile_capabilities = use_signal(String::new);
+    let new_profile_form = (new_profile_id, new_profile_role, new_profile_capabilities);
     let snapshot = state.read().clone();
     let project_count = snapshot.portfolio.projects.len();
     let active_runs = snapshot.portfolio.active_runs();
@@ -212,6 +249,7 @@ fn App() -> Element {
     let on_reconcile = move |request| handle_reconciliation(state, &request);
     let on_transition = move |request| handle_transition(state, &request);
     let on_agent_plan = move |request| handle_agent_plan(state, &request);
+    let on_agent_profile = move |request| handle_agent_profile(state, new_profile_form, &request);
 
     rsx! {
         document::Title { "Gareji Board" }
@@ -258,6 +296,10 @@ fn App() -> Element {
                 aside { class: "action-notice", "{notice}" }
             }
 
+            if let Some(notice) = &snapshot.agent_profile_notice {
+                aside { class: "action-notice", "{notice}" }
+            }
+
             ActivityInbox {
                 activity: snapshot.activity.clone(),
                 work_items: snapshot.work_items.clone(),
@@ -268,6 +310,15 @@ fn App() -> Element {
                 activity: snapshot.activity.clone(),
                 warning: snapshot.activity_warning.clone(),
                 on_reconcile,
+            }
+
+            AgentProfileCatalog {
+                agent_profiles: snapshot.agent_profiles.clone(),
+                work_items: snapshot.work_items.clone(),
+                new_profile_id,
+                new_profile_role,
+                new_profile_capabilities,
+                on_save: on_agent_profile,
             }
 
             WorkItemControl {
@@ -661,6 +712,213 @@ fn reconciliation_class(decision: ReconciliationDecision) -> &'static str {
     match decision {
         ReconciliationDecision::Accepted => "reconciliation-result reconciliation-accepted",
         ReconciliationDecision::Dismissed => "reconciliation-result reconciliation-dismissed",
+    }
+}
+
+#[component]
+fn AgentProfileCatalog(
+    agent_profiles: Vec<AgentProfileSummary>,
+    work_items: Vec<WorkItemSummary>,
+    new_profile_id: Signal<String>,
+    new_profile_role: Signal<String>,
+    new_profile_capabilities: Signal<String>,
+    on_save: EventHandler<AgentProfileSaveRequest>,
+) -> Element {
+    let profile_count = agent_profiles.len();
+    let capability_catalog = agent_capability_catalog(&agent_profiles, &work_items);
+    let capability_catalog_label = capability_catalog.join(", ");
+    rsx! {
+        section { class: "section-heading",
+            div {
+                p { class: "kicker", "Scheduling roles" }
+                h3 { "Agent profiles" }
+            }
+            span { "{profile_count} configured" }
+        }
+        section { class: "agent-catalog", aria_label: "Agent profile catalog",
+            NewAgentProfileForm {
+                existing_profiles: agent_profiles.clone(),
+                profile_id: new_profile_id,
+                role: new_profile_role,
+                capability_input: new_profile_capabilities,
+                on_save,
+            }
+            div { class: "agent-profile-grid",
+                for profile in agent_profiles {
+                    AgentProfileCard {
+                        key: "{profile.id}",
+                        profile,
+                        on_save,
+                    }
+                }
+            }
+            if capability_catalog.is_empty() {
+                p { class: "agent-catalog-hint", "No scheduling capabilities are configured yet." }
+            } else {
+                p { class: "agent-catalog-hint",
+                    "Capabilities in use: {capability_catalog_label}"
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn NewAgentProfileForm(
+    existing_profiles: Vec<AgentProfileSummary>,
+    mut profile_id: Signal<String>,
+    mut role: Signal<String>,
+    mut capability_input: Signal<String>,
+    on_save: EventHandler<AgentProfileSaveRequest>,
+) -> Element {
+    let profile_id_value = profile_id.read().clone();
+    let role_value = role.read().clone();
+    let capability_input_value = capability_input.read().clone();
+    let capabilities = parse_agent_capabilities(&capability_input_value);
+    let duplicate_id = existing_profiles
+        .iter()
+        .any(|profile| profile.id == profile_id_value);
+    let can_create = agent_profile_id_is_valid(&profile_id_value)
+        && agent_role_is_valid(&role_value)
+        && capability_input_is_valid(&capability_input_value)
+        && !duplicate_id;
+    let request = AgentProfileSaveRequest {
+        expected: None,
+        target: AgentProfileSummary {
+            id: profile_id_value.clone(),
+            role: role_value.trim().to_owned(),
+            capabilities,
+        },
+    };
+    rsx! {
+        details { class: "new-agent-profile",
+            summary { "Add Agent profile" }
+            div { class: "agent-profile-form",
+                label {
+                    span { "Stable ID" }
+                    input {
+                        aria_label: "New Agent profile ID",
+                        value: "{profile_id_value}",
+                        maxlength: 64,
+                        placeholder: "qa-specialist",
+                        oninput: move |event| profile_id.set(event.value()),
+                    }
+                    small { "Lowercase letters, numbers, hyphens, or underscores." }
+                }
+                label {
+                    span { "Role name" }
+                    input {
+                        aria_label: "New Agent profile role",
+                        value: "{role_value}",
+                        maxlength: 128,
+                        placeholder: "QA specialist",
+                        oninput: move |event| role.set(event.value()),
+                    }
+                }
+                AgentCapabilityInput {
+                    value: capability_input_value,
+                    label: "Declared capabilities",
+                    on_change: move |value| capability_input.set(value),
+                }
+                if duplicate_id {
+                    p { class: "field-warning", "That Agent profile ID already exists." }
+                }
+                button {
+                    class: "agent-profile-action",
+                    disabled: !can_create,
+                    onclick: move |_| on_save.call(request.clone()),
+                    "Create profile"
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn AgentProfileCard(
+    profile: AgentProfileSummary,
+    on_save: EventHandler<AgentProfileSaveRequest>,
+) -> Element {
+    let initial_role = profile.role.clone();
+    let initial_capabilities = profile.capabilities.join(", ");
+    let mut role = use_signal(move || initial_role);
+    let mut capability_input = use_signal(move || initial_capabilities);
+    let role_value = role.read().clone();
+    let capability_input_value = capability_input.read().clone();
+    let target = AgentProfileSummary {
+        id: profile.id.clone(),
+        role: role_value.trim().to_owned(),
+        capabilities: parse_agent_capabilities(&capability_input_value),
+    };
+    let can_save = target != profile
+        && agent_role_is_valid(&role_value)
+        && capability_input_is_valid(&capability_input_value);
+    let request = AgentProfileSaveRequest {
+        expected: Some(profile.clone()),
+        target,
+    };
+    let capability_label = if profile.capabilities.is_empty() {
+        "No capabilities".to_owned()
+    } else {
+        profile.capabilities.join(", ")
+    };
+    rsx! {
+        article { class: "agent-profile-card",
+            div { class: "agent-profile-card-head",
+                div {
+                    h4 { "{profile.role}" }
+                    code { "{profile.id}" }
+                }
+                span { "{profile.capabilities.len()} capabilities" }
+            }
+            p { class: "agent-profile-capabilities", "{capability_label}" }
+            details {
+                summary { "Edit profile" }
+                div { class: "agent-profile-form compact",
+                    label {
+                        span { "Role name" }
+                        input {
+                            aria_label: "Role for {profile.id}",
+                            value: "{role_value}",
+                            maxlength: 128,
+                            oninput: move |event| role.set(event.value()),
+                        }
+                    }
+                    AgentCapabilityInput {
+                        value: capability_input_value,
+                        label: "Declared capabilities",
+                        on_change: move |value| capability_input.set(value),
+                    }
+                    button {
+                        class: "agent-profile-action",
+                        disabled: !can_save,
+                        onclick: move |_| on_save.call(request.clone()),
+                        "Save profile"
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn AgentCapabilityInput(
+    value: String,
+    label: &'static str,
+    on_change: EventHandler<String>,
+) -> Element {
+    rsx! {
+        label {
+            span { "{label}" }
+            input {
+                aria_label: "{label}",
+                value: "{value}",
+                maxlength: 512,
+                placeholder: "research, evidence",
+                oninput: move |event| on_change.call(event.value()),
+            }
+            small { "Separate capabilities with commas. Leave blank for none." }
+        }
     }
 }
 
@@ -1113,6 +1371,49 @@ fn approval_requirement_class(requirement: ApprovalRequirement) -> &'static str 
     }
 }
 
+fn parse_agent_capabilities(value: &str) -> Vec<String> {
+    let mut capabilities = value
+        .split(',')
+        .map(str::trim)
+        .filter(|capability| !capability.is_empty())
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    capabilities.sort();
+    capabilities.dedup();
+    capabilities
+}
+
+fn capability_input_is_valid(value: &str) -> bool {
+    value.chars().count() <= 512
+        && value
+            .split(',')
+            .map(str::trim)
+            .filter(|capability| !capability.is_empty())
+            .all(|capability| capability.chars().count() <= 64)
+}
+
+fn agent_profile_id_is_valid(value: &str) -> bool {
+    let length = value.chars().count();
+    let mut characters = value.chars();
+    let Some(first) = characters.next() else {
+        return false;
+    };
+    let last = value.chars().next_back().unwrap_or(first);
+    length <= 64
+        && first.is_ascii_lowercase()
+        && last.is_ascii_alphanumeric()
+        && value.chars().all(|character| {
+            character.is_ascii_lowercase()
+                || character.is_ascii_digit()
+                || matches!(character, '-' | '_')
+        })
+}
+
+fn agent_role_is_valid(value: &str) -> bool {
+    let trimmed = value.trim();
+    !trimmed.is_empty() && trimmed.chars().count() <= 128
+}
+
 fn agent_capability_catalog(
     agent_profiles: &[AgentProfileSummary],
     work_items: &[WorkItemSummary],
@@ -1278,6 +1579,30 @@ fn agent_plan_message(receipt: &AgentPlanUpdateReceipt) -> String {
     )
 }
 
+fn agent_profile_message(receipt: &AgentProfileSaveReceipt) -> String {
+    if !receipt.changed {
+        return format!(
+            "Agent profile {} already had these settings.",
+            receipt.resulting.id
+        );
+    }
+    let action = if receipt.previous.is_none() {
+        "created"
+    } else {
+        "saved"
+    };
+    let capability_count = receipt.resulting.capabilities.len();
+    let capability_noun = if capability_count == 1 {
+        "capability"
+    } else {
+        "capabilities"
+    };
+    format!(
+        "Agent profile {} {action} with {capability_count} {capability_noun}.",
+        receipt.resulting.id
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1349,6 +1674,23 @@ mod tests {
                 "testing".to_owned(),
             ]
         );
+    }
+
+    #[test]
+    fn agent_profile_form_normalizes_capabilities_and_checks_stable_ids() {
+        assert_eq!(
+            parse_agent_capabilities(" testing, review, testing,  evidence "),
+            vec![
+                "evidence".to_owned(),
+                "review".to_owned(),
+                "testing".to_owned(),
+            ]
+        );
+        assert!(agent_profile_id_is_valid("qa-specialist_2"));
+        assert!(!agent_profile_id_is_valid("QA specialist"));
+        assert!(!agent_profile_id_is_valid("-reviewer"));
+        assert!(agent_role_is_valid("Quality reviewer"));
+        assert!(!agent_role_is_valid("   "));
     }
 
     #[test]
