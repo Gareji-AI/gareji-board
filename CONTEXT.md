@@ -74,6 +74,10 @@ _Avoid_: Core capability, Skill, permission
 The Board-owned relationship selecting one Agent profile for a Work item. Assignment establishes intended responsibility but does not start a Run.
 _Avoid_: Run, agent process
 
+**Agent plan**:
+The Board-owned combination of one Work item's Agent assignment and required Agent capabilities. Changing it updates scheduling intent atomically but does not start a Run or grant Core capability.
+_Avoid_: agent configuration, Run configuration
+
 **Active Work assessment**:
 The Board-owned judgment that a specific Work item may be associated with current direct or Runner work. `todo`, `in_progress`, and `in_review` are eligible; unadmitted, blocked, and terminal work is not.
 _Avoid_: Core permission, inferred branch match

@@ -50,6 +50,12 @@ Each Checkpoint receives at most one reconciliation decision. A later correction
 
 The Work item control surface lets a person explicitly select any canonical Work item state. The request carries the state the person observed; Board rejects the change when the stored state has moved since that observation instead of overwriting newer coordination. Selecting the already-stored state is an idempotent no-op. A human transition changes only the Board-owned Work item and does not rewrite a Checkpoint, attachment, reconciliation decision, or Run outcome.
 
+## Explicit Agent plan updates
+
+The Work item control surface lets a person atomically change the assigned Agent profile and required Agent capabilities without changing Work item state. The request carries the complete Agent plan the person observed; Board rejects the update when either the stored assignment or capability requirements changed first instead of overwriting newer coordination. Saving an identical plan is an idempotent no-op.
+
+An Agent plan may deliberately be unassigned or require a capability that no current Agent profile declares. Such a plan is valid scheduling intent, but Safe Autopilot skips the Work item until a suitable profile is assigned. A referenced Agent profile must exist when the update is applied. Agent plan updates do not create a Run, select a model, or grant Core capability.
+
 ## Controller stop and fast exit
 
 A controller-wide `decision=stop` means no candidate may start during that tick. The current compatibility rules stop when:
@@ -96,7 +102,7 @@ Runnable candidates are ranked deterministically by:
 
 The preview reports state-ineligible, project-capacity, approval-required, first-unresolved-dependency, unassigned, missing-Agent-capability, and lower-ranked candidates separately so the person can understand the result. Reaching the configured global concurrency cap or finding no runnable candidate returns `decision=continue`, no candidate, and `fast_exit_required=true`; it is not a failure. A zero global cap, a duplicate Work item or Agent profile identity, a Work item whose project is missing from the portfolio, a dependency whose Work item is missing, or an assignment whose Agent profile is missing fails closed with `decision=stop`, no candidate, and `fast_exit_required=true`.
 
-Work items created from the Activity Inbox receive priority `100` and no Agent assignment until explicit editing is implemented. The bundled desktop sample uses a global preview concurrency cap of `2`.
+Work items created from the Activity Inbox receive priority `100` and no Agent assignment until a person records an Agent plan. The bundled desktop sample uses a global preview concurrency cap of `2`.
 
 ## Compatibility defaults
 
