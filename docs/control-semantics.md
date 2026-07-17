@@ -70,7 +70,9 @@ Changing a profile does not rewrite any Work item's Agent plan. Because Safe Aut
 
 ## Read-only Agent behavior inspection
 
-The Agent catalog may inspect one profile against a selected Execution workspace. The inspection checks only filesystem identity and containment: the instruction reference must resolve to a regular file below the canonical workspace root, and each Skill reference must resolve to `.agents/skills/<skill-id>/SKILL.md` below that same root. Missing files are reported separately from unsafe references that escape through a symbolic link or other canonical path change. An unavailable workspace produces one bounded workspace result instead of treating every reference as missing.
+The Agent catalog selects a Board project, then inspects one profile against that project's selected Execution workspace connection. The connection is local Board configuration: a bundled sample source or a canonical local directory path. Selecting or replacing a connection does not read behavior contents, enable a Skill, establish trust, grant workspace-write access, or create a Run.
+
+The inspection checks only filesystem identity and containment: the instruction reference must resolve to a regular file below the canonical workspace root, and each Skill reference must resolve to `.agents/skills/<skill-id>/SKILL.md` below that same root. Missing files are reported separately from unsafe references that escape through a symbolic link or other canonical path change. An unavailable or unconfigured connection produces one bounded workspace result instead of treating every reference as missing.
 
 A profile with no instruction and no Skills is reported as having no configured behavior references rather than as invalid. When every configured reference resolves, Board reports the references as present, not trusted or runnable. Inspection never reads or displays file contents, installs or enables Skills, changes the profile, starts a Run, or grants Core capability. Runner must repeat authoritative preflight in the isolated Run workspace immediately before execution and fail closed if the result changed.
 

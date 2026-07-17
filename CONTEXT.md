@@ -28,6 +28,10 @@ _Avoid_: primary adapter, active backend
 A local directory or repository in which an agent is permitted to perform project work. It is connected to a Board project but remains separate from its knowledge workspace.
 _Avoid_: knowledge workspace, project directory
 
+**Execution workspace connection**:
+The Board-owned local association between one Board project and its currently selected Execution workspace. It records only the connection kind and local location; source files, Git state, access grants, and execution evidence remain outside Board coordination state. In v0, a project has at most one selected connection.
+_Avoid_: Runner workspace, repository mirror, access grant
+
 **Obsidian client**:
 An optional Markdown editor that a person may use to view and edit a Markdown Zettelkasten. It is not a required Board integration or the source of truth.
 _Avoid_: knowledge workspace, adapter

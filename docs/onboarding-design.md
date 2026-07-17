@@ -8,9 +8,9 @@ Gareji Board has two first-launch paths. Both produce the same Board project mod
 
 The launcher copies writable demo material into an application-owned session directory. Knowledge notes come from the demo Knowledge workspace; Agent instructions and Skills come from the separate demo Execution workspace fixture. It never writes into either bundled fixture, a personal knowledge workspace, or an existing source repository. The user can reset the session to its original state.
 
-## Add existing project
+## Connect an existing execution workspace
 
-The user selects an existing local repository or directory. Gareji Board validates it and stores an in-place connection; it does not relocate, copy, initialize, or publish the project.
+For an existing Board project, the user selects an existing local repository or directory. Gareji Board resolves the directory and stores an in-place Execution workspace connection; it does not relocate, copy, initialize, or publish the project. The v0 Board stores at most one selected Execution workspace connection per Board project. Replacing it is an explicit local configuration change, not a source-code operation.
 
 The connection flow shows:
 
@@ -22,7 +22,7 @@ The connection flow shows:
 6. optional links to one or more knowledge context sources;
 7. actions that still require human approval.
 
-A non-Git directory is valid. A missing, unreadable, or moved directory remains visible as disconnected instead of being silently removed.
+A non-Git directory is valid. A missing, unreadable, or moved directory remains visible as disconnected instead of being silently removed. Board stores the canonical local path needed to find the workspace again, but does not store its source files, Git state, instruction contents, Skill contents, or access grants.
 
 ## Skill trust
 
@@ -44,7 +44,7 @@ The module exposes two operations:
 
 ```text
 open_sample() -> Board session
-connect_existing_project(path, access_policy) -> Project connection
+connect_execution_workspace(project_id, path) -> Execution workspace connection
 ```
 
-Fixture materialization, path validation, repository detection, instruction discovery, Skill discovery, identity generation, and connection diagnostics remain inside the module. Callers receive a validated session or connection plus bounded diagnostics; they do not reproduce onboarding rules.
+Fixture materialization, path validation, repository detection, instruction discovery, Skill discovery, identity generation, and connection diagnostics remain inside the module. Callers receive a validated session or connection plus bounded diagnostics; they do not reproduce onboarding rules. Access-policy selection is deferred until Runner wiring, because connecting a directory alone must not grant execution authority.
