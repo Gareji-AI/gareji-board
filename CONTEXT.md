@@ -54,6 +54,14 @@ _Avoid_: Run state, failure category
 An explicit Board-owned change from one Work item state to another. A human transition is distinct from accepting a Checkpoint recommendation or reconciling a Run.
 _Avoid_: checkpoint decision, Run outcome
 
+**Work item dependency**:
+A directed prerequisite from one Work item to another. The dependent item remains in its own lifecycle state while unresolved prerequisites make it ineligible for execution.
+_Avoid_: blocker text, Run ordering
+
+**Approval requirement**:
+The Board-owned indication that starting a Work item needs an explicit human decision in addition to Core capability policy. It is not approval evidence and does not grant a capability.
+_Avoid_: capability grant, automatic approval
+
 **Active Work assessment**:
 The Board-owned judgment that a specific Work item may be associated with current direct or Runner work. `todo`, `in_progress`, and `in_review` are eligible; unadmitted, blocked, and terminal work is not.
 _Avoid_: Core permission, inferred branch match

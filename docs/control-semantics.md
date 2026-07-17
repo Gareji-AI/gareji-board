@@ -72,6 +72,7 @@ These conditions skip one candidate while allowing the controller to consider an
 - an active or queued Run already exists;
 - cooldown is active;
 - `waiting_on`, `blocked_reason`, or blocked wording is present;
+- an explicit Approval requirement has no trusted approval evidence;
 - a dependency is not done-like;
 - evidence preflight fails;
 - another active item has the same scope;
@@ -80,16 +81,18 @@ These conditions skip one candidate while allowing the controller to consider an
 
 ## Read-only candidate preview
 
-The desktop Board may evaluate a bounded candidate preview before Runner execution is connected. This preview is explanatory only: it never creates a Run, changes Work item state, reserves capacity, or grants execution authority. Dependency, approval, cooldown, agent-capability, workspace, and evidence preflights remain required before a later execution path may start the selected item.
+The desktop Board may evaluate a bounded candidate preview before Runner execution is connected. This preview is explanatory only: it never creates a Run, changes Work item state, reserves capacity, records approval evidence, or grants execution authority. Cooldown, agent-capability, workspace, and evidence preflights remain required before a later execution path may start the selected item.
 
-The v0 preview considers only canonical `todo` Work items whose Board project is below its execution cap. It ranks runnable candidates deterministically by:
+The v0 preview considers only canonical `todo` Work items whose Board project is below its execution cap, whose persisted Approval requirement is `none`, and whose persisted Work item dependencies are done-like. A dependency on canonical `done` or `cancelled` is done-like; supported import aliases are normalized before evaluation. An explicit Approval requirement is skipped until a later execution path can supply trusted, operation-bound approval evidence.
+
+Runnable candidates are ranked deterministically by:
 
 1. lowest project execution-cap utilization, compared as exact fractions;
 2. lowest numeric Work item priority;
 3. project ID;
 4. Work item ID.
 
-The preview reports state-ineligible, project-capacity, and lower-ranked candidates separately so the person can understand the result. Reaching the configured global concurrency cap or finding no runnable candidate returns `decision=continue`, no candidate, and `fast_exit_required=true`; it is not a failure. A zero global cap or a Work item whose project is missing from the portfolio fails closed with `decision=stop`, no candidate, and `fast_exit_required=true`.
+The preview reports state-ineligible, project-capacity, approval-required, first-unresolved-dependency, and lower-ranked candidates separately so the person can understand the result. Reaching the configured global concurrency cap or finding no runnable candidate returns `decision=continue`, no candidate, and `fast_exit_required=true`; it is not a failure. A zero global cap, a duplicate Work item identity, a Work item whose project is missing from the portfolio, or a dependency whose Work item is missing fails closed with `decision=stop`, no candidate, and `fast_exit_required=true`.
 
 Work items created from the Activity Inbox receive priority `100` until explicit priority editing is implemented. The bundled desktop sample uses a global preview concurrency cap of `2`.
 
