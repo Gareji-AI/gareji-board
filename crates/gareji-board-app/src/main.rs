@@ -859,12 +859,14 @@ mod tests {
                 id: "CORE-1".to_owned(),
                 project_id: "gareji-core".to_owned(),
                 title: "First".to_owned(),
+                priority: 1,
                 state: WorkItemState::Done,
             },
             WorkItemSummary {
                 id: "CORE-4".to_owned(),
                 project_id: "gareji-core".to_owned(),
                 title: "Fourth".to_owned(),
+                priority: 2,
                 state: WorkItemState::Todo,
             },
         ];
@@ -880,12 +882,14 @@ mod tests {
                 id: "BOARD-2".to_owned(),
                 project_id: "gareji-board".to_owned(),
                 title: "Second".to_owned(),
+                priority: 2,
                 state: WorkItemState::Blocked,
             },
             WorkItemSummary {
                 id: "BOARD-1".to_owned(),
                 project_id: "gareji-board".to_owned(),
                 title: "First".to_owned(),
+                priority: 1,
                 state: WorkItemState::Todo,
             },
         ]);

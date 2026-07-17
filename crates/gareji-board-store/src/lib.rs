@@ -76,6 +76,7 @@ impl SqliteBoardStore {
                    id TEXT PRIMARY KEY,
                    project_id TEXT NOT NULL,
                    title TEXT NOT NULL,
+                   priority INTEGER NOT NULL DEFAULT 100 CHECK (priority > 0),
                    state TEXT NOT NULL CHECK (
                      state IN ('backlog', 'todo', 'in_progress', 'in_review', 'blocked', 'done', 'cancelled')
                    ),
@@ -112,9 +113,31 @@ impl SqliteBoardStore {
                     FOREIGN KEY (work_item_id) REFERENCES board_work_items(id)
                   );
                   CREATE INDEX IF NOT EXISTS board_attachments_by_work_item
-                    ON board_checkpoint_attachments(project_id, work_item_id, attached_at);
-                  PRAGMA user_version = 3;",
+                    ON board_checkpoint_attachments(project_id, work_item_id, attached_at);",
             )
+            .map_err(StoreError::Sqlite)?;
+        let has_priority: bool = connection
+            .query_row(
+                "SELECT EXISTS(
+                   SELECT 1
+                   FROM pragma_table_info('board_work_items')
+                   WHERE name = 'priority'
+                 )",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(StoreError::Sqlite)?;
+        if !has_priority {
+            connection
+                .execute(
+                    "ALTER TABLE board_work_items
+                     ADD COLUMN priority INTEGER NOT NULL DEFAULT 100 CHECK (priority > 0)",
+                    [],
+                )
+                .map_err(StoreError::Sqlite)?;
+        }
+        connection
+            .execute_batch("PRAGMA user_version = 4;")
             .map_err(StoreError::Sqlite)?;
         Ok(Self { connection })
     }
@@ -162,39 +185,50 @@ impl SqliteBoardStore {
                 "BOARD-1",
                 "gareji-board",
                 "Build portfolio screen",
+                1_i64,
                 WorkItemState::InProgress,
             ),
             (
                 "BOARD-2",
                 "gareji-board",
                 "Connect existing project",
+                2_i64,
                 WorkItemState::Todo,
             ),
             (
                 "CORE-1",
                 "gareji-core",
                 "Stabilize Runner seam",
+                1_i64,
                 WorkItemState::InReview,
             ),
             (
                 "CORE-2",
                 "gareji-core",
                 "Add active-work registry",
+                1_i64,
                 WorkItemState::Todo,
             ),
             (
                 "ZETTEL-1",
                 "zettelkasten-plugin",
                 "Resolve write destination",
+                1_i64,
                 WorkItemState::Blocked,
             ),
         ];
         for work_item in work_items {
             transaction
                 .execute(
-                    "INSERT INTO board_work_items (id, project_id, title, state)
-                     VALUES (?1, ?2, ?3, ?4)",
-                    params![work_item.0, work_item.1, work_item.2, work_item.3.as_str()],
+                    "INSERT INTO board_work_items (id, project_id, title, priority, state)
+                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                    params![
+                        work_item.0,
+                        work_item.1,
+                        work_item.2,
+                        work_item.3,
+                        work_item.4.as_str()
+                    ],
                 )
                 .map_err(StoreError::Sqlite)?;
         }
@@ -261,9 +295,9 @@ impl SqliteBoardStore {
         let mut statement = self
             .connection
             .prepare(
-                "SELECT id, project_id, title, state
+                "SELECT id, project_id, title, priority, state
                  FROM board_work_items
-                 ORDER BY project_id, id",
+                 ORDER BY project_id, priority, id",
             )
             .map_err(StoreError::Sqlite)?;
         let rows = statement
@@ -272,17 +306,19 @@ impl SqliteBoardStore {
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
                     row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, String>(4)?,
                 ))
             })
             .map_err(StoreError::Sqlite)?;
         let mut work_items = Vec::new();
         for row in rows {
-            let (id, project_id, title, state) = row.map_err(StoreError::Sqlite)?;
+            let (id, project_id, title, priority, state) = row.map_err(StoreError::Sqlite)?;
             work_items.push(WorkItemSummary {
                 id,
                 project_id,
                 title,
+                priority: positive_u32(priority)?,
                 state: parse_work_item_state(&state)?,
             });
         }
@@ -888,6 +924,13 @@ fn bounded_u32(value: i64) -> Result<u32, StoreError> {
     u32::try_from(value).map_err(|_| StoreError::CorruptState("numeric value out of range"))
 }
 
+fn positive_u32(value: i64) -> Result<u32, StoreError> {
+    match bounded_u32(value)? {
+        0 => Err(StoreError::CorruptState("numeric value must be positive")),
+        value => Ok(value),
+    }
+}
+
 fn validate_id(value: &str) -> Result<(), StoreError> {
     let length = value.chars().count();
     if length == 0 || length > 128 {
@@ -1338,7 +1381,7 @@ mod tests {
     }
 
     #[test]
-    fn opening_a_v2_database_adds_attachment_storage() {
+    fn opening_a_v2_database_adds_current_coordination_storage() {
         let connection = Connection::open_in_memory().unwrap();
         connection
             .execute_batch(
@@ -1386,7 +1429,16 @@ mod tests {
             .connection
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 3);
+        assert_eq!(version, 4);
+        let priority: i64 = store
+            .connection
+            .query_row(
+                "SELECT priority FROM board_work_items WHERE id = 'CORE-1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(priority, 100);
     }
 
     fn activity(

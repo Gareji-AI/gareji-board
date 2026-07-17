@@ -460,6 +460,8 @@ pub struct WorkItemSummary {
     pub id: String,
     pub project_id: String,
     pub title: String,
+    /// Lower values are considered first by deterministic selection policies.
+    pub priority: u32,
     pub state: WorkItemState,
 }
 
