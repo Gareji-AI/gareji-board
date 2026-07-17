@@ -4,12 +4,12 @@ use std::path::PathBuf;
 use dioxus::prelude::*;
 use gareji_board_core::CoreProgressReader;
 use gareji_board_domain::{
-    ActivityTimeline, ApprovalRequirement, AttachmentReceipt, AttachmentRequest, AttachmentTarget,
-    AutopilotStopReason, CandidateSkipReason, CheckpointDeliveryStatus, CheckpointOutcome,
-    CheckpointReconciliation, NoCandidateReason, PortfolioSnapshot, ProgressActivity,
-    ProjectHealth, ReconciliationDecision, ReconciliationReceipt, ReconciliationRequest,
-    SafeAutopilotOutcome, SafeAutopilotPreview, WorkItemState, WorkItemSummary,
-    WorkItemTransitionReceipt, WorkItemTransitionRequest,
+    ActivityTimeline, AgentProfileSummary, ApprovalRequirement, AttachmentReceipt,
+    AttachmentRequest, AttachmentTarget, AutopilotStopReason, CandidateSkipReason,
+    CheckpointDeliveryStatus, CheckpointOutcome, CheckpointReconciliation, NoCandidateReason,
+    PortfolioSnapshot, ProgressActivity, ProjectHealth, ReconciliationDecision,
+    ReconciliationReceipt, ReconciliationRequest, SafeAutopilotOutcome, SafeAutopilotPreview,
+    WorkItemState, WorkItemSummary, WorkItemTransitionReceipt, WorkItemTransitionRequest,
 };
 use gareji_board_store::{SqliteBoardStore, default_board_database_path};
 
@@ -33,6 +33,7 @@ fn main() {
 struct AppState {
     portfolio: PortfolioSnapshot,
     work_items: Vec<WorkItemSummary>,
+    agent_profiles: Vec<AgentProfileSummary>,
     activity: ActivityTimeline,
     storage_label: String,
     warning: Option<String>,
@@ -50,11 +51,12 @@ fn load_app_state() -> AppState {
         store.seed_sample_if_empty()?;
         let portfolio = store.load_portfolio()?;
         let work_items = store.load_work_items()?;
-        Ok((store, portfolio, work_items))
+        let agent_profiles = store.load_agent_profiles()?;
+        Ok((store, portfolio, work_items, agent_profiles))
     });
 
     match loaded {
-        Ok((store, portfolio, work_items)) => {
+        Ok((store, portfolio, work_items, agent_profiles)) => {
             let project_ids = portfolio
                 .projects
                 .iter()
@@ -80,6 +82,7 @@ fn load_app_state() -> AppState {
             AppState {
                 portfolio,
                 work_items,
+                agent_profiles,
                 activity,
                 storage_label,
                 warning: None,
@@ -93,6 +96,7 @@ fn load_app_state() -> AppState {
         Err(error) => AppState {
             portfolio: PortfolioSnapshot::default(),
             work_items: Vec::new(),
+            agent_profiles: Vec::new(),
             activity: ActivityTimeline::default(),
             storage_label,
             warning: Some(error.to_string()),
@@ -141,10 +145,12 @@ fn App() -> Element {
     let delivery_issues = snapshot.activity.delivery_issues();
     let preview_portfolio = snapshot.portfolio.clone();
     let preview_work_items = snapshot.work_items.clone();
+    let preview_agent_profiles = snapshot.agent_profiles.clone();
     let on_preview = move |_| {
         state.write().autopilot_preview = Some(SafeAutopilotPreview::evaluate(
             &preview_portfolio,
             &preview_work_items,
+            &preview_agent_profiles,
             PREVIEW_GLOBAL_CONCURRENCY_CAP,
         ));
     };
@@ -708,6 +714,15 @@ fn WorkItemCard(
         expected_state: observed_state,
         target_state,
     };
+    let agent_label = item
+        .agent_profile_id
+        .as_deref()
+        .map_or("Unassigned", |agent_profile_id| agent_profile_id);
+    let capability_label = if item.required_capabilities.is_empty() {
+        "No capability requirements".to_owned()
+    } else {
+        format!("Requires · {}", item.required_capabilities.join(", "))
+    };
     rsx! {
         article { class: "work-item-card",
             div { class: "work-item-head",
@@ -731,6 +746,10 @@ fn WorkItemCard(
                         "{item.dependency_ids.len()} dependency(s)"
                     }
                 }
+                span { class: if item.agent_profile_id.is_some() { "work-item-gate gate-agent" } else { "work-item-gate gate-missing" },
+                    "Agent · {agent_label}"
+                }
+                span { "{capability_label}" }
             }
             p { class: "work-item-eligibility", "{work_item_eligibility_label(item.state)}" }
             div { class: "work-item-actions",
@@ -795,10 +814,10 @@ fn AutopilotPreviewPanel(preview: SafeAutopilotPreview) -> Element {
                         div { class: "preview-candidate-body",
                             h4 { "{candidate.work_item.title}" }
                             p {
-                                "{candidate.project_name} is at {candidate.active_runs}/{candidate.execution_cap} active capacity. This item is priority {candidate.work_item.priority}."
+                                "{candidate.project_name} is at {candidate.active_runs}/{candidate.execution_cap} active capacity. {candidate.agent_profile.role} is assigned and satisfies every required Agent capability. This item is priority {candidate.work_item.priority}."
                             }
                             div { class: "preview-facts",
-                                span { "Stored gates passed" }
+                                span { "Board gates passed" }
                                 span { "Lowest project load first" }
                                 span { "Then priority" }
                                 span { "Then stable IDs" }
@@ -823,7 +842,7 @@ fn AutopilotPreviewPanel(preview: SafeAutopilotPreview) -> Element {
             div { class: "preview-foot",
                 div {
                     strong { "{fast_exit}" }
-                    p { "Stored dependencies and Approval requirements are checked here. Execution still requires trusted capability, workspace, cooldown, and evidence preflights." }
+                    p { "Stored dependencies, Approval requirements, assignment, and Agent capabilities are checked here. Execution still requires trusted Core capability, workspace, cooldown, and evidence preflights." }
                 }
                 span { "Global capacity {PREVIEW_GLOBAL_CONCURRENCY_CAP}" }
             }
@@ -865,6 +884,13 @@ fn candidate_skip_message(reason: &CandidateSkipReason) -> String {
             dependency_id,
             state,
         } => format!("Dependency {dependency_id} is still {state}."),
+        CandidateSkipReason::AgentNotAssigned => {
+            "No Agent profile is assigned to this Work item.".to_owned()
+        }
+        CandidateSkipReason::AgentCapabilityUnavailable {
+            agent_profile_id,
+            capability,
+        } => format!("Agent {agent_profile_id} does not declare {capability}."),
         CandidateSkipReason::LowerRanked => {
             "Runnable, but ranked behind the selected candidate.".to_owned()
         }
@@ -878,8 +904,7 @@ fn no_candidate_message(reason: NoCandidateReason) -> String {
             concurrency_cap,
         } => format!("Global capacity is already {active_runs}/{concurrency_cap}."),
         NoCandidateReason::NoRunnableCandidate => {
-            "No todo Work item passed the stored dependency, Approval, and capacity gates."
-                .to_owned()
+            "No todo Work item passed the stored dependency, Approval, assignment, Agent capability, and capacity gates.".to_owned()
         }
     }
 }
@@ -898,6 +923,9 @@ fn autopilot_stop_message(reason: &AutopilotStopReason) -> String {
         AutopilotStopReason::DuplicateWorkItem { work_item_id } => {
             format!("Work item {work_item_id} appears more than once.")
         }
+        AutopilotStopReason::DuplicateAgentProfile { agent_profile_id } => {
+            format!("Agent profile {agent_profile_id} appears more than once.")
+        }
         AutopilotStopReason::ProjectNotFound { project_id } => {
             format!("A Work item refers to missing project {project_id}.")
         }
@@ -905,6 +933,12 @@ fn autopilot_stop_message(reason: &AutopilotStopReason) -> String {
             work_item_id,
             dependency_id,
         } => format!("Work item {work_item_id} refers to missing dependency {dependency_id}."),
+        AutopilotStopReason::AgentProfileNotFound {
+            work_item_id,
+            agent_profile_id,
+        } => {
+            format!("Work item {work_item_id} refers to missing Agent profile {agent_profile_id}.")
+        }
     }
 }
 
@@ -1063,6 +1097,8 @@ mod tests {
                 state: WorkItemState::Done,
                 approval_requirement: ApprovalRequirement::None,
                 dependency_ids: Vec::new(),
+                agent_profile_id: Some("implementer".to_owned()),
+                required_capabilities: vec!["implementation".to_owned()],
             },
             WorkItemSummary {
                 id: "CORE-4".to_owned(),
@@ -1072,6 +1108,8 @@ mod tests {
                 state: WorkItemState::Todo,
                 approval_requirement: ApprovalRequirement::None,
                 dependency_ids: Vec::new(),
+                agent_profile_id: Some("implementer".to_owned()),
+                required_capabilities: vec!["implementation".to_owned()],
             },
         ];
 
@@ -1090,6 +1128,8 @@ mod tests {
                 state: WorkItemState::Blocked,
                 approval_requirement: ApprovalRequirement::Explicit,
                 dependency_ids: vec!["BOARD-1".to_owned()],
+                agent_profile_id: Some("reviewer".to_owned()),
+                required_capabilities: vec!["review".to_owned()],
             },
             WorkItemSummary {
                 id: "BOARD-1".to_owned(),
@@ -1099,6 +1139,8 @@ mod tests {
                 state: WorkItemState::Todo,
                 approval_requirement: ApprovalRequirement::None,
                 dependency_ids: Vec::new(),
+                agent_profile_id: Some("implementer".to_owned()),
+                required_capabilities: vec!["implementation".to_owned()],
             },
         ]);
 

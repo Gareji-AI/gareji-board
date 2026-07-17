@@ -525,6 +525,16 @@ pub struct WorkItemSummary {
     pub state: WorkItemState,
     pub approval_requirement: ApprovalRequirement,
     pub dependency_ids: Vec<String>,
+    pub agent_profile_id: Option<String>,
+    pub required_capabilities: Vec<String>,
+}
+
+/// Board-owned agent role available for Work item assignment.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AgentProfileSummary {
+    pub id: String,
+    pub role: String,
+    pub capabilities: Vec<String>,
 }
 
 /// Explicit human intent to change one Board-owned Work item state.
@@ -611,6 +621,7 @@ impl AutopilotDecision {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AutopilotCandidate {
     pub work_item: WorkItemSummary,
+    pub agent_profile: AgentProfileSummary,
     pub project_name: String,
     pub active_runs: u32,
     pub execution_cap: u32,
@@ -632,6 +643,11 @@ pub enum CandidateSkipReason {
     DependencyNotDone {
         dependency_id: String,
         state: WorkItemState,
+    },
+    AgentNotAssigned,
+    AgentCapabilityUnavailable {
+        agent_profile_id: String,
+        capability: String,
     },
     LowerRanked,
 }
@@ -666,12 +682,19 @@ pub enum AutopilotStopReason {
     DuplicateWorkItem {
         work_item_id: String,
     },
+    DuplicateAgentProfile {
+        agent_profile_id: String,
+    },
     ProjectNotFound {
         project_id: String,
     },
     DependencyNotFound {
         work_item_id: String,
         dependency_id: String,
+    },
+    AgentProfileNotFound {
+        work_item_id: String,
+        agent_profile_id: String,
     },
 }
 
@@ -692,6 +715,7 @@ pub struct SafeAutopilotPreview {
 
 type ProjectIndex<'a> = HashMap<&'a str, &'a ProjectSummary>;
 type WorkItemIndex<'a> = HashMap<&'a str, &'a WorkItemSummary>;
+type AgentProfileIndex<'a> = HashMap<&'a str, &'a AgentProfileSummary>;
 
 impl SafeAutopilotPreview {
     /// Evaluate current Board-owned facts without mutating or reserving them.
@@ -699,16 +723,18 @@ impl SafeAutopilotPreview {
     pub fn evaluate(
         portfolio: &PortfolioSnapshot,
         work_items: &[WorkItemSummary],
+        agent_profiles: &[AgentProfileSummary],
         global_concurrency_cap: u32,
     ) -> Self {
         if global_concurrency_cap == 0 {
             return Self::stopped(AutopilotStopReason::InvalidGlobalConcurrencyCap);
         }
 
-        let (projects, work_items_by_id) = match Self::index_facts(portfolio, work_items) {
-            Ok(indexes) => indexes,
-            Err(reason) => return Self::stopped(reason),
-        };
+        let (projects, work_items_by_id, agent_profiles_by_id) =
+            match Self::index_facts(portfolio, work_items, agent_profiles) {
+                Ok(indexes) => indexes,
+                Err(reason) => return Self::stopped(reason),
+            };
 
         let active_runs = portfolio.active_runs();
         let global_capacity_reached = active_runs >= global_concurrency_cap;
@@ -717,35 +743,37 @@ impl SafeAutopilotPreview {
 
         for work_item in work_items {
             let project = projects[work_item.project_id.as_str()];
-            let reason = Self::candidate_skip_reason(
+            let preflight = Self::candidate_preflight(
                 work_item,
                 project,
                 &work_items_by_id,
+                &agent_profiles_by_id,
                 active_runs,
                 global_concurrency_cap,
             );
 
-            if let Some(reason) = reason {
-                skipped.push(CandidateSkip {
+            match preflight {
+                Ok(agent_profile) => runnable.push((work_item, project, agent_profile)),
+                Err(reason) => skipped.push(CandidateSkip {
                     work_item: work_item.clone(),
                     reason,
-                });
-            } else {
-                runnable.push((work_item, project));
+                }),
             }
         }
 
-        runnable.sort_by(|(left_item, left_project), (right_item, right_project)| {
-            let left_load = u64::from(left_project.work_items.in_progress)
-                * u64::from(right_project.execution_cap);
-            let right_load = u64::from(right_project.work_items.in_progress)
-                * u64::from(left_project.execution_cap);
-            left_load
-                .cmp(&right_load)
-                .then_with(|| left_item.priority.cmp(&right_item.priority))
-                .then_with(|| left_project.id.cmp(&right_project.id))
-                .then_with(|| left_item.id.cmp(&right_item.id))
-        });
+        runnable.sort_by(
+            |(left_item, left_project, _), (right_item, right_project, _)| {
+                let left_load = u64::from(left_project.work_items.in_progress)
+                    * u64::from(right_project.execution_cap);
+                let right_load = u64::from(right_project.work_items.in_progress)
+                    * u64::from(left_project.execution_cap);
+                left_load
+                    .cmp(&right_load)
+                    .then_with(|| left_item.priority.cmp(&right_item.priority))
+                    .then_with(|| left_project.id.cmp(&right_project.id))
+                    .then_with(|| left_item.id.cmp(&right_item.id))
+            },
+        );
 
         let outcome = if runnable.is_empty() {
             if global_capacity_reached {
@@ -757,8 +785,8 @@ impl SafeAutopilotPreview {
                 SafeAutopilotOutcome::NoCandidate(NoCandidateReason::NoRunnableCandidate)
             }
         } else {
-            let (work_item, project) = runnable.remove(0);
-            for (lower_ranked, _) in runnable {
+            let (work_item, project, agent_profile) = runnable.remove(0);
+            for (lower_ranked, _, _) in runnable {
                 skipped.push(CandidateSkip {
                     work_item: lower_ranked.clone(),
                     reason: CandidateSkipReason::LowerRanked,
@@ -766,6 +794,7 @@ impl SafeAutopilotPreview {
             }
             SafeAutopilotOutcome::Candidate(AutopilotCandidate {
                 work_item: work_item.clone(),
+                agent_profile: agent_profile.clone(),
                 project_name: project.name.clone(),
                 active_runs: project.work_items.in_progress,
                 execution_cap: project.execution_cap,
@@ -806,7 +835,9 @@ impl SafeAutopilotPreview {
     fn index_facts<'a>(
         portfolio: &'a PortfolioSnapshot,
         work_items: &'a [WorkItemSummary],
-    ) -> Result<(ProjectIndex<'a>, WorkItemIndex<'a>), AutopilotStopReason> {
+        agent_profiles: &'a [AgentProfileSummary],
+    ) -> Result<(ProjectIndex<'a>, WorkItemIndex<'a>, AgentProfileIndex<'a>), AutopilotStopReason>
+    {
         let mut projects = HashMap::with_capacity(portfolio.projects.len());
         for project in &portfolio.projects {
             if project.execution_cap == 0 {
@@ -844,35 +875,58 @@ impl SafeAutopilotPreview {
                 }
             }
         }
-        Ok((projects, items))
+
+        let mut agents = HashMap::with_capacity(agent_profiles.len());
+        for agent_profile in agent_profiles {
+            if agents
+                .insert(agent_profile.id.as_str(), agent_profile)
+                .is_some()
+            {
+                return Err(AutopilotStopReason::DuplicateAgentProfile {
+                    agent_profile_id: agent_profile.id.clone(),
+                });
+            }
+        }
+        for work_item in work_items {
+            if let Some(agent_profile_id) = &work_item.agent_profile_id
+                && !agents.contains_key(agent_profile_id.as_str())
+            {
+                return Err(AutopilotStopReason::AgentProfileNotFound {
+                    work_item_id: work_item.id.clone(),
+                    agent_profile_id: agent_profile_id.clone(),
+                });
+            }
+        }
+        Ok((projects, items, agents))
     }
 
-    fn candidate_skip_reason(
-        work_item: &WorkItemSummary,
+    fn candidate_preflight<'a>(
+        work_item: &'a WorkItemSummary,
         project: &ProjectSummary,
         work_items: &WorkItemIndex<'_>,
+        agent_profiles: &AgentProfileIndex<'a>,
         active_runs: u32,
         concurrency_cap: u32,
-    ) -> Option<CandidateSkipReason> {
+    ) -> Result<&'a AgentProfileSummary, CandidateSkipReason> {
         if work_item.state != WorkItemState::Todo {
-            return Some(CandidateSkipReason::StateNotTodo(work_item.state));
+            return Err(CandidateSkipReason::StateNotTodo(work_item.state));
         }
         if active_runs >= concurrency_cap {
-            return Some(CandidateSkipReason::GlobalCapacityReached {
+            return Err(CandidateSkipReason::GlobalCapacityReached {
                 active_runs,
                 concurrency_cap,
             });
         }
         if project.work_items.in_progress >= project.execution_cap {
-            return Some(CandidateSkipReason::ProjectAtCapacity {
+            return Err(CandidateSkipReason::ProjectAtCapacity {
                 active_runs: project.work_items.in_progress,
                 execution_cap: project.execution_cap,
             });
         }
         if work_item.approval_requirement.requires_approval() {
-            return Some(CandidateSkipReason::ApprovalRequired);
+            return Err(CandidateSkipReason::ApprovalRequired);
         }
-        work_item.dependency_ids.iter().find_map(|dependency_id| {
+        if let Some(reason) = work_item.dependency_ids.iter().find_map(|dependency_id| {
             let dependency = work_items[dependency_id.as_str()];
             (!dependency.state.resolves_dependency()).then(|| {
                 CandidateSkipReason::DependencyNotDone {
@@ -880,7 +934,25 @@ impl SafeAutopilotPreview {
                     state: dependency.state,
                 }
             })
-        })
+        }) {
+            return Err(reason);
+        }
+        let Some(agent_profile_id) = work_item.agent_profile_id.as_deref() else {
+            return Err(CandidateSkipReason::AgentNotAssigned);
+        };
+        let agent_profile = agent_profiles[agent_profile_id];
+        if let Some(capability) = work_item
+            .required_capabilities
+            .iter()
+            .filter(|required| !agent_profile.capabilities.contains(required))
+            .min()
+        {
+            return Err(CandidateSkipReason::AgentCapabilityUnavailable {
+                agent_profile_id: agent_profile.id.clone(),
+                capability: capability.clone(),
+            });
+        }
+        Ok(agent_profile)
     }
 }
 
@@ -1027,7 +1099,7 @@ mod tests {
             work_item("CORE-2", "core", 1, WorkItemState::Blocked),
         ];
 
-        let preview = SafeAutopilotPreview::evaluate(&portfolio, &work_items, 3);
+        let preview = evaluate_preview(&portfolio, &work_items, 3);
 
         let SafeAutopilotOutcome::Candidate(candidate) = &preview.outcome else {
             panic!("expected a candidate")
@@ -1058,7 +1130,7 @@ mod tests {
             work_item("A-0", "alpha", 2, WorkItemState::Todo),
         ];
 
-        let preview = SafeAutopilotPreview::evaluate(&portfolio, &work_items, 2);
+        let preview = evaluate_preview(&portfolio, &work_items, 2);
 
         let SafeAutopilotOutcome::Candidate(candidate) = preview.outcome else {
             panic!("expected a candidate")
@@ -1073,7 +1145,7 @@ mod tests {
         };
         let work_items = vec![work_item("CORE-1", "core", 1, WorkItemState::Todo)];
 
-        let preview = SafeAutopilotPreview::evaluate(&portfolio, &work_items, 1);
+        let preview = evaluate_preview(&portfolio, &work_items, 1);
 
         assert_eq!(
             preview.outcome,
@@ -1108,6 +1180,7 @@ mod tests {
         let preview = SafeAutopilotPreview::evaluate(
             &portfolio,
             &[approval, prerequisite, dependent, candidate],
+            &agent_profiles(),
             3,
         );
 
@@ -1138,12 +1211,48 @@ mod tests {
             let mut dependent = work_item("BOARD-2", "board", 1, WorkItemState::Todo);
             dependent.dependency_ids.push("BOARD-1".to_owned());
 
-            let preview = SafeAutopilotPreview::evaluate(&portfolio, &[prerequisite, dependent], 2);
+            let preview = evaluate_preview(&portfolio, &[prerequisite, dependent], 2);
             let SafeAutopilotOutcome::Candidate(candidate) = preview.outcome else {
                 panic!("expected a candidate")
             };
             assert_eq!(candidate.work_item.id, "BOARD-2");
         }
+    }
+
+    #[test]
+    fn candidate_preview_skips_unassigned_and_unqualified_agents() {
+        let portfolio = PortfolioSnapshot {
+            projects: vec![project("board", 0, 3)],
+        };
+        let mut unassigned = work_item("BOARD-1", "board", 1, WorkItemState::Todo);
+        unassigned.agent_profile_id = None;
+        let mut unqualified = work_item("BOARD-2", "board", 2, WorkItemState::Todo);
+        unqualified.required_capabilities = vec!["release".to_owned(), "security".to_owned()];
+        let candidate = work_item("BOARD-3", "board", 3, WorkItemState::Todo);
+
+        let preview = SafeAutopilotPreview::evaluate(
+            &portfolio,
+            &[unassigned, unqualified, candidate],
+            &agent_profiles(),
+            3,
+        );
+
+        let SafeAutopilotOutcome::Candidate(candidate) = &preview.outcome else {
+            panic!("expected a candidate")
+        };
+        assert_eq!(candidate.work_item.id, "BOARD-3");
+        assert_eq!(candidate.agent_profile.id, "implementer");
+        assert!(preview.skipped.iter().any(|skip| {
+            skip.work_item.id == "BOARD-1" && skip.reason == CandidateSkipReason::AgentNotAssigned
+        }));
+        assert!(preview.skipped.iter().any(|skip| {
+            skip.work_item.id == "BOARD-2"
+                && skip.reason
+                    == CandidateSkipReason::AgentCapabilityUnavailable {
+                        agent_profile_id: "implementer".to_owned(),
+                        capability: "release".to_owned(),
+                    }
+        }));
     }
 
     #[test]
@@ -1153,7 +1262,7 @@ mod tests {
         };
         let missing_project = vec![work_item("BOARD-1", "board", 1, WorkItemState::Todo)];
 
-        let preview = SafeAutopilotPreview::evaluate(&portfolio, &missing_project, 2);
+        let preview = evaluate_preview(&portfolio, &missing_project, 2);
         assert_eq!(
             preview.outcome,
             SafeAutopilotOutcome::Stop(AutopilotStopReason::ProjectNotFound {
@@ -1164,7 +1273,7 @@ mod tests {
         assert!(preview.fast_exit_required());
 
         assert_eq!(
-            SafeAutopilotPreview::evaluate(&portfolio, &[], 0).outcome,
+            evaluate_preview(&portfolio, &[], 0).outcome,
             SafeAutopilotOutcome::Stop(AutopilotStopReason::InvalidGlobalConcurrencyCap)
         );
 
@@ -1173,7 +1282,7 @@ mod tests {
             .dependency_ids
             .push("CORE-MISSING".to_owned());
         assert_eq!(
-            SafeAutopilotPreview::evaluate(&portfolio, &[missing_dependency], 2).outcome,
+            evaluate_preview(&portfolio, &[missing_dependency], 2).outcome,
             SafeAutopilotOutcome::Stop(AutopilotStopReason::DependencyNotFound {
                 work_item_id: "CORE-1".to_owned(),
                 dependency_id: "CORE-MISSING".to_owned(),
@@ -1182,9 +1291,34 @@ mod tests {
 
         let duplicate = work_item("CORE-1", "core", 2, WorkItemState::Todo);
         assert_eq!(
-            SafeAutopilotPreview::evaluate(&portfolio, &[duplicate.clone(), duplicate], 2).outcome,
+            evaluate_preview(&portfolio, &[duplicate.clone(), duplicate], 2).outcome,
             SafeAutopilotOutcome::Stop(AutopilotStopReason::DuplicateWorkItem {
                 work_item_id: "CORE-1".to_owned(),
+            })
+        );
+
+        let duplicate_profile = agent_profiles()[0].clone();
+        assert_eq!(
+            SafeAutopilotPreview::evaluate(
+                &portfolio,
+                &[work_item("CORE-1", "core", 1, WorkItemState::Todo)],
+                &[duplicate_profile.clone(), duplicate_profile],
+                2,
+            )
+            .outcome,
+            SafeAutopilotOutcome::Stop(AutopilotStopReason::DuplicateAgentProfile {
+                agent_profile_id: "implementer".to_owned(),
+            })
+        );
+
+        let mut missing_profile = work_item("CORE-1", "core", 1, WorkItemState::Todo);
+        missing_profile.agent_profile_id = Some("missing".to_owned());
+        assert_eq!(
+            SafeAutopilotPreview::evaluate(&portfolio, &[missing_profile], &agent_profiles(), 2,)
+                .outcome,
+            SafeAutopilotOutcome::Stop(AutopilotStopReason::AgentProfileNotFound {
+                work_item_id: "CORE-1".to_owned(),
+                agent_profile_id: "missing".to_owned(),
             })
         );
     }
@@ -1216,6 +1350,24 @@ mod tests {
             state,
             approval_requirement: ApprovalRequirement::None,
             dependency_ids: Vec::new(),
+            agent_profile_id: Some("implementer".to_owned()),
+            required_capabilities: vec!["implementation".to_owned()],
         }
+    }
+
+    fn agent_profiles() -> Vec<AgentProfileSummary> {
+        vec![AgentProfileSummary {
+            id: "implementer".to_owned(),
+            role: "Implementer".to_owned(),
+            capabilities: vec!["implementation".to_owned(), "testing".to_owned()],
+        }]
+    }
+
+    fn evaluate_preview(
+        portfolio: &PortfolioSnapshot,
+        work_items: &[WorkItemSummary],
+        concurrency_cap: u32,
+    ) -> SafeAutopilotPreview {
+        SafeAutopilotPreview::evaluate(portfolio, work_items, &agent_profiles(), concurrency_cap)
     }
 }

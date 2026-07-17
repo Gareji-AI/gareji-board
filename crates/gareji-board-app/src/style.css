@@ -142,6 +142,8 @@ button, input, select { font: inherit; }
 .work-item-gates span { padding: 5px 7px; border: 1px solid #33413b; border-radius: 999px; color: #8f9d96; background: #1b2420; font-size: 9px; font-weight: 700; }
 .work-item-gates .gate-ready { color: #98d7ae; border-color: #315740; background: #17271d; }
 .work-item-gates .gate-approval { color: #ffd29c; border-color: #6a4b2c; background: #2b2117; }
+.work-item-gates .gate-agent { color: #a6d4ff; border-color: #31536a; background: #172632; }
+.work-item-gates .gate-missing { color: #ffb5a7; border-color: #6a3730; background: #2b1a18; }
 .work-item-eligibility { margin: 14px 0 0; color: #aeb9b4; font-size: 11px; }
 .work-item-state { flex: none; padding: 6px 8px; border-radius: 7px; font-size: 10px; font-weight: 750; }
 .state-backlog { color: #b9c1bd; background: #29312e; }
