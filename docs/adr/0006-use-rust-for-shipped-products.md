@@ -6,4 +6,4 @@ Gareji Core, Runner, MCP, Board state, Knowledge Adapters, and shipped validatio
 
 Python is not a product runtime dependency. The original fixture validator is replaced by a Rust `xtask` in a separate mechanical commit. JavaScript application logic is excluded by default; a future WebView limitation may justify a small, isolated Adapter after its need is demonstrated.
 
-The repository keeps separate domain, SQLite store, and desktop application crates. The Store Module owns schema creation and queries behind its Rust Interface; the UI never issues SQL. Cross-repository contracts live in a dependency-light Core contracts crate rather than being copied into UI or MCP implementations.
+The repository keeps separate domain, SQLite store, local Bridge, and desktop application crates. The Store Module owns schema creation and queries behind its Rust Interface; the UI and Bridge never issue SQL. Cross-product behavior uses narrow versioned Bridge Interfaces rather than direct access to another product's database.

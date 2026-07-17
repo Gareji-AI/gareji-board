@@ -50,6 +50,10 @@ _Avoid_: note application, vault
 The Gareji lifecycle classification of a unit of work: `backlog`, `todo`, `in_progress`, `in_review`, `blocked`, `done`, or `cancelled`. A failed execution is a Run outcome, not a Work item state.
 _Avoid_: Run state, failure category
 
+**Active Work assessment**:
+The Board-owned judgment that a specific Work item may be associated with current direct or Runner work. `todo`, `in_progress`, and `in_review` are eligible; unadmitted, blocked, and terminal work is not.
+_Avoid_: Core permission, inferred branch match
+
 **Gareji Safe Autopilot**:
 The default deterministic control policy for safe selection, reconciliation, stopping, and fast exit. It is a stable built-in profile that future custom policies may replace explicitly.
 _Avoid_: scheduler, agent, runtime

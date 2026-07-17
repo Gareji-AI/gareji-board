@@ -53,10 +53,10 @@ GBrain and LLMWiki are future adapters: useful real-world integrations, not prer
 
 ## Status
 
-Private local scaffold. No remote repository, publication, or release has been created.
+Private local development repository. No public repository, publication, or release has been created.
 
 See [the product brief](docs/product-brief.md), [the onboarding design](docs/onboarding-design.md), [the control semantics](docs/control-semantics.md), [the Runner design](docs/runner-design.md), and [the demo fixture](examples/demo-board.json).
 
-Run the current Rust desktop shell with `cargo run -p gareji-board-app`. It creates disposable sample coordination state in the operating system's local application-data directory; Core and Runner execution are not wired yet.
+Run the current Rust desktop shell with `cargo run -p gareji-board-app`. It creates disposable sample coordination state in the operating system's local application-data directory. `cargo run -p gareji-board-bridge --bin gareji-board -- seed-sample` initializes the same sample explicitly for Core integration; the local Board Bridge now validates active-work selection, while Runner execution is not wired yet.
 
 Validate code, documentation, schemas, references, and public-data hygiene with `cargo test --workspace` and `cargo xtask validate`. Contribution and security expectations are documented in [CONTRIBUTING.md](CONTRIBUTING.md) and [SECURITY.md](SECURITY.md).

@@ -35,6 +35,7 @@ Direct human-Codex work enters at the Progress Recorder instead of the Runner. I
 - Runner: Codex first; another runtime later.
 - Knowledge Adapter: local JSON and Markdown Zettelkasten first; GBrain and LLMWiki later.
 - Progress capture transport: Runner, MCP, CLI, and trusted lifecycle Hook all call one Recorder.
+- Active-work assessment: Core calls the local Board Bridge; Board alone interprets Work item state eligibility.
 
 These seams stay small. Provider fields, delivery retries, conflict rules, and task transitions do not leak into every caller.
 
@@ -49,6 +50,6 @@ These seams stay small. Provider fields, delivery retries, conflict rules, and t
 
 ## Implementation status
 
-Gareji Core now provides the first Capability Gate and SQLite-backed Progress Recorder implementation. Gareji Board still uses fixtures only: Board-to-Core policy calls, Recorder reads, visible delivery timelines, and Board-to-Runner execution are not wired yet.
+Gareji Core provides the first Capability Gate, SQLite-backed Progress Recorder, Project Registry, and local Core Bridge. Gareji Board now exposes a local Bridge that assesses Work item existence, project relationship, and active-work eligibility from live Board SQLite state. The desktop portfolio still uses sample coordination records, and Board-to-Runner execution, Recorder timelines, and state reconciliation are not wired yet.
 
 Board mirrors Core's canonical `progress-checkpoint-v0` transport schema for local validation. The mirrored copies must remain JSON-equivalent; Board does not redefine the Checkpoint contract.

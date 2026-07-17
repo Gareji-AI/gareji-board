@@ -20,6 +20,10 @@ The canonical states are:
 
 A Run has a separate lifecycle. `failed` and `error` are Run outcomes, not Work item states. A failed, errored, or cancelled assigned Run is normally reconciled to `in_review` so a human or later policy can choose rerun, `blocked`, or `cancelled`.
 
+## Active Work assessment
+
+Before Core stores an active Work item reference, Board assesses the explicit project and Work item pair without changing either record. `todo`, `in_progress`, and `in_review` are eligible. `backlog` is not admitted, `blocked` cannot proceed, and `done` or `cancelled` is terminal. Unknown and cross-project identities are rejected as not found.
+
 ## Reconciliation before selection
 
 Before selecting new `todo` work, the controller reconciles stale state:
