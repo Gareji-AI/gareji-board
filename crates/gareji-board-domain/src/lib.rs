@@ -336,6 +336,29 @@ pub struct ReconciliationReceipt {
     pub reconciliation: CheckpointReconciliation,
 }
 
+/// Final Board-owned Work item association for a project-only Checkpoint.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CheckpointAttachment {
+    pub work_item_id: String,
+}
+
+/// Explicit user intent passed to Board's Checkpoint attachment Module.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AttachmentRequest {
+    pub checkpoint_id: String,
+    pub project_id: String,
+    pub checkpoint_work_item_id: Option<String>,
+    pub work_item_id: String,
+}
+
+/// Durable result from one Checkpoint attachment attempt.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AttachmentReceipt {
+    pub checkpoint_id: String,
+    pub duplicate: bool,
+    pub attachment: CheckpointAttachment,
+}
+
 /// Stored reconciliation decision violated the domain vocabulary.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct UnknownReconciliationDecision;
@@ -360,7 +383,26 @@ pub struct ProgressActivity {
     pub summary: String,
     pub recommended_state: Option<WorkItemState>,
     pub deliveries: Vec<CheckpointDelivery>,
+    pub attachment: Option<CheckpointAttachment>,
     pub reconciliation: Option<CheckpointReconciliation>,
+}
+
+impl ProgressActivity {
+    /// Resolve the original Core link or a later Board-owned attachment.
+    #[must_use]
+    pub fn effective_work_item_id(&self) -> Option<&str> {
+        self.work_item_id.as_deref().or_else(|| {
+            self.attachment
+                .as_ref()
+                .map(|attachment| attachment.work_item_id.as_str())
+        })
+    }
+
+    /// Identify project-only activity still waiting for a human attachment.
+    #[must_use]
+    pub fn is_inbox(&self) -> bool {
+        self.effective_work_item_id().is_none()
+    }
 }
 
 /// Bounded Board read model derived from Core-owned Progress Checkpoints.
@@ -381,6 +423,26 @@ impl ActivityTimeline {
             .try_into()
             .unwrap_or(u32::MAX)
     }
+
+    /// Count project-only Checkpoints awaiting a Work item attachment.
+    #[must_use]
+    pub fn inbox_count(&self) -> u32 {
+        self.activities
+            .iter()
+            .filter(|activity| activity.is_inbox())
+            .count()
+            .try_into()
+            .unwrap_or(u32::MAX)
+    }
+}
+
+/// Existing Board Work item available as an Activity Inbox target.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WorkItemSummary {
+    pub id: String,
+    pub project_id: String,
+    pub title: String,
+    pub state: WorkItemState,
 }
 
 /// Counts needed by the portfolio screen without exposing storage rows.
@@ -512,12 +574,39 @@ mod tests {
                         last_error: Some("unavailable".to_owned()),
                     },
                 ],
+                attachment: None,
                 reconciliation: None,
             }],
             has_older: false,
         };
 
         assert_eq!(timeline.delivery_issues(), 1);
+        assert_eq!(timeline.inbox_count(), 0);
+    }
+
+    #[test]
+    fn attachment_resolves_an_inbox_activity_without_rewriting_its_core_link() {
+        let mut activity = ProgressActivity {
+            checkpoint_id: "cp-inbox".to_owned(),
+            recorded_at: "2026-07-17T12:00:00+09:00".to_owned(),
+            project_id: "core".to_owned(),
+            work_item_id: None,
+            source: CheckpointSource::Mcp,
+            outcome: CheckpointOutcome::Progress,
+            summary: "Made progress".to_owned(),
+            recommended_state: None,
+            deliveries: Vec::new(),
+            attachment: None,
+            reconciliation: None,
+        };
+
+        assert!(activity.is_inbox());
+        activity.attachment = Some(CheckpointAttachment {
+            work_item_id: "CORE-1".to_owned(),
+        });
+        assert_eq!(activity.work_item_id, None);
+        assert_eq!(activity.effective_work_item_id(), Some("CORE-1"));
+        assert!(!activity.is_inbox());
     }
 
     #[test]

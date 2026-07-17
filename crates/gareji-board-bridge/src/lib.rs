@@ -137,7 +137,9 @@ fn map_store_error(request_id: String, error: &StoreError) -> BoardBridgeRespons
             BoardBridgeErrorCode::WorkItemNotFound,
             "Work item was not found in the requested project",
         ),
-        StoreError::AlreadyReconciled
+        StoreError::CheckpointAlreadyLinked
+        | StoreError::AlreadyAttached
+        | StoreError::AlreadyReconciled
         | StoreError::UnsupportedReconciliation
         | StoreError::ConcurrentChange
         | StoreError::CreateDirectory(_)

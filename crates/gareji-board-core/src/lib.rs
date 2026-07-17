@@ -288,6 +288,7 @@ fn decode_page(result: Value, expected_project_id: &str) -> Result<DecodedPage, 
                         last_error: delivery.last_error,
                     })
                     .collect(),
+                attachment: None,
                 reconciliation: None,
             },
         });

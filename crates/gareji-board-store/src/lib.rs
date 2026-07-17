@@ -7,9 +7,10 @@ use std::time::Duration;
 
 use directories::ProjectDirs;
 use gareji_board_domain::{
-    ActiveWorkAssessment, ActivityTimeline, CheckpointReconciliation, PortfolioSnapshot,
-    ProjectHealth, ProjectSummary, ReconciliationDecision, ReconciliationReceipt,
-    ReconciliationRequest, WorkItemCounts, WorkItemState,
+    ActiveWorkAssessment, ActivityTimeline, AttachmentReceipt, AttachmentRequest,
+    CheckpointAttachment, CheckpointReconciliation, PortfolioSnapshot, ProjectHealth,
+    ProjectSummary, ReconciliationDecision, ReconciliationReceipt, ReconciliationRequest,
+    WorkItemCounts, WorkItemState, WorkItemSummary,
 };
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params, params_from_iter};
 use thiserror::Error;
@@ -99,9 +100,19 @@ impl SqliteBoardStore {
                    FOREIGN KEY (project_id) REFERENCES board_projects(id),
                    FOREIGN KEY (work_item_id) REFERENCES board_work_items(id)
                  );
-                 CREATE INDEX IF NOT EXISTS board_reconciliations_by_work_item
-                   ON board_checkpoint_reconciliations(project_id, work_item_id, decided_at);
-                 PRAGMA user_version = 2;",
+                  CREATE INDEX IF NOT EXISTS board_reconciliations_by_work_item
+                    ON board_checkpoint_reconciliations(project_id, work_item_id, decided_at);
+                  CREATE TABLE IF NOT EXISTS board_checkpoint_attachments (
+                    checkpoint_id TEXT PRIMARY KEY,
+                    project_id TEXT NOT NULL,
+                    work_item_id TEXT NOT NULL,
+                    attached_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (project_id) REFERENCES board_projects(id),
+                    FOREIGN KEY (work_item_id) REFERENCES board_work_items(id)
+                  );
+                  CREATE INDEX IF NOT EXISTS board_attachments_by_work_item
+                    ON board_checkpoint_attachments(project_id, work_item_id, attached_at);
+                  PRAGMA user_version = 3;",
             )
             .map_err(StoreError::Sqlite)?;
         Ok(Self { connection })
@@ -240,6 +251,43 @@ impl SqliteBoardStore {
         Ok(PortfolioSnapshot { projects })
     }
 
+    /// Load existing Work items available to the Activity Inbox.
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage or corrupt-state error.
+    pub fn load_work_items(&self) -> Result<Vec<WorkItemSummary>, StoreError> {
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT id, project_id, title, state
+                 FROM board_work_items
+                 ORDER BY project_id, id",
+            )
+            .map_err(StoreError::Sqlite)?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            })
+            .map_err(StoreError::Sqlite)?;
+        let mut work_items = Vec::new();
+        for row in rows {
+            let (id, project_id, title, state) = row.map_err(StoreError::Sqlite)?;
+            work_items.push(WorkItemSummary {
+                id,
+                project_id,
+                title,
+                state: parse_work_item_state(&state)?,
+            });
+        }
+        Ok(work_items)
+    }
+
     /// Assess one explicit Work item through Board-owned state and project authority.
     ///
     /// Unknown or unrelated Work item identities share one not-found result so this
@@ -284,6 +332,78 @@ impl SqliteBoardStore {
             work_item_id: stored_work_item_id,
             state,
             eligibility: state.active_work_eligibility(),
+        })
+    }
+
+    /// Attach one project-only Checkpoint to an existing Work item.
+    ///
+    /// # Errors
+    ///
+    /// Returns a bounded validation, lookup, conflict, storage, or corrupt-state
+    /// error. Retrying the identical request is successful.
+    pub fn attach_checkpoint(
+        &mut self,
+        request: &AttachmentRequest,
+    ) -> Result<AttachmentReceipt, StoreError> {
+        validate_id(&request.checkpoint_id)?;
+        validate_id(&request.project_id)?;
+        validate_id(&request.work_item_id)?;
+        if let Some(work_item_id) = &request.checkpoint_work_item_id {
+            validate_id(work_item_id)?;
+            return Err(StoreError::CheckpointAlreadyLinked);
+        }
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(StoreError::Sqlite)?;
+
+        if let Some(existing) = load_attachment(&transaction, &request.checkpoint_id)? {
+            if existing.project_id == request.project_id
+                && existing.attachment.work_item_id == request.work_item_id
+            {
+                return Ok(AttachmentReceipt {
+                    checkpoint_id: request.checkpoint_id.clone(),
+                    duplicate: true,
+                    attachment: existing.attachment,
+                });
+            }
+            return Err(StoreError::AlreadyAttached);
+        }
+
+        transaction
+            .query_row(
+                "SELECT w.id
+                 FROM board_projects p
+                 LEFT JOIN board_work_items w
+                   ON w.project_id = p.id AND w.id = ?2
+                 WHERE p.id = ?1",
+                params![request.project_id, request.work_item_id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()
+            .map_err(StoreError::Sqlite)?
+            .ok_or(StoreError::ProjectNotFound)?
+            .ok_or(StoreError::WorkItemNotFound)?;
+
+        transaction
+            .execute(
+                "INSERT INTO board_checkpoint_attachments (
+                   checkpoint_id, project_id, work_item_id
+                 ) VALUES (?1, ?2, ?3)",
+                params![
+                    request.checkpoint_id,
+                    request.project_id,
+                    request.work_item_id
+                ],
+            )
+            .map_err(StoreError::Sqlite)?;
+        transaction.commit().map_err(StoreError::Sqlite)?;
+        Ok(AttachmentReceipt {
+            checkpoint_id: request.checkpoint_id.clone(),
+            duplicate: false,
+            attachment: CheckpointAttachment {
+                work_item_id: request.work_item_id.clone(),
+            },
         })
     }
 
@@ -393,15 +513,12 @@ impl SqliteBoardStore {
         })
     }
 
-    /// Add Board-owned reconciliation decisions to a Core-derived Activity timeline.
+    /// Add Board-owned attachments and reconciliation decisions to Core activity.
     ///
     /// # Errors
     ///
     /// Returns a bounded validation, storage, or corrupt-state error.
-    pub fn hydrate_activity_reconciliations(
-        &self,
-        timeline: &mut ActivityTimeline,
-    ) -> Result<(), StoreError> {
+    pub fn hydrate_activity(&self, timeline: &mut ActivityTimeline) -> Result<(), StoreError> {
         if timeline.activities.is_empty() {
             return Ok(());
         }
@@ -411,6 +528,65 @@ impl SqliteBoardStore {
         for activity in &timeline.activities {
             validate_id(&activity.checkpoint_id)?;
         }
+        self.hydrate_activity_attachments(timeline)?;
+        self.hydrate_activity_reconciliations(timeline)
+    }
+
+    fn hydrate_activity_attachments(
+        &self,
+        timeline: &mut ActivityTimeline,
+    ) -> Result<(), StoreError> {
+        let placeholders = std::iter::repeat_n("?", timeline.activities.len())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "SELECT checkpoint_id, project_id, work_item_id
+             FROM board_checkpoint_attachments
+             WHERE checkpoint_id IN ({placeholders})"
+        );
+        let mut statement = self.connection.prepare(&sql).map_err(StoreError::Sqlite)?;
+        let rows = statement
+            .query_map(
+                params_from_iter(
+                    timeline
+                        .activities
+                        .iter()
+                        .map(|activity| &activity.checkpoint_id),
+                ),
+                |row| {
+                    Ok(StoredAttachment {
+                        checkpoint_id: row.get(0)?,
+                        project_id: row.get(1)?,
+                        attachment: CheckpointAttachment {
+                            work_item_id: row.get(2)?,
+                        },
+                    })
+                },
+            )
+            .map_err(StoreError::Sqlite)?;
+        let mut attachments = HashMap::new();
+        for row in rows {
+            let stored = row.map_err(StoreError::Sqlite)?;
+            attachments.insert(stored.checkpoint_id.clone(), stored);
+        }
+        for activity in &mut timeline.activities {
+            let Some(stored) = attachments.remove(&activity.checkpoint_id) else {
+                continue;
+            };
+            if stored.project_id != activity.project_id || activity.work_item_id.is_some() {
+                return Err(StoreError::CorruptState(
+                    "attachment does not match its Checkpoint",
+                ));
+            }
+            activity.attachment = Some(stored.attachment);
+        }
+        Ok(())
+    }
+
+    fn hydrate_activity_reconciliations(
+        &self,
+        timeline: &mut ActivityTimeline,
+    ) -> Result<(), StoreError> {
         let placeholders = std::iter::repeat_n("?", timeline.activities.len())
             .collect::<Vec<_>>()
             .join(", ");
@@ -452,7 +628,7 @@ impl SqliteBoardStore {
                 continue;
             };
             if stored.project_id != activity.project_id
-                || activity.work_item_id.as_deref() != Some(stored.work_item_id.as_str())
+                || activity.effective_work_item_id() != Some(stored.work_item_id.as_str())
                 || activity.recommended_state != Some(stored.reconciliation.recommended_state)
             {
                 return Err(StoreError::CorruptState(
@@ -463,6 +639,36 @@ impl SqliteBoardStore {
         }
         Ok(())
     }
+}
+
+struct StoredAttachment {
+    checkpoint_id: String,
+    project_id: String,
+    attachment: CheckpointAttachment,
+}
+
+fn load_attachment(
+    connection: &Connection,
+    checkpoint_id: &str,
+) -> Result<Option<StoredAttachment>, StoreError> {
+    connection
+        .query_row(
+            "SELECT checkpoint_id, project_id, work_item_id
+             FROM board_checkpoint_attachments
+             WHERE checkpoint_id = ?1",
+            [checkpoint_id],
+            |row| {
+                Ok(StoredAttachment {
+                    checkpoint_id: row.get(0)?,
+                    project_id: row.get(1)?,
+                    attachment: CheckpointAttachment {
+                        work_item_id: row.get(2)?,
+                    },
+                })
+            },
+        )
+        .optional()
+        .map_err(StoreError::Sqlite)
 }
 
 struct RawReconciliation {
@@ -588,6 +794,10 @@ pub enum StoreError {
     ProjectNotFound,
     #[error("Work item was not found in the requested project")]
     WorkItemNotFound,
+    #[error("this Checkpoint already has a Work item link")]
+    CheckpointAlreadyLinked,
+    #[error("this Checkpoint is already attached to another Work item")]
+    AlreadyAttached,
     #[error("this Checkpoint already has a final reconciliation decision")]
     AlreadyReconciled,
     #[error("the recommended Work item transition requires a separate explicit action")]
@@ -697,9 +907,7 @@ mod tests {
             )],
             has_older: false,
         };
-        store
-            .hydrate_activity_reconciliations(&mut timeline)
-            .unwrap();
+        store.hydrate_activity(&mut timeline).unwrap();
         assert_eq!(
             timeline.activities[0]
                 .reconciliation
@@ -762,7 +970,112 @@ mod tests {
     }
 
     #[test]
-    fn opening_a_v1_database_adds_reconciliation_storage() {
+    fn attachment_resolves_inbox_activity_and_is_idempotent() {
+        let mut store = SqliteBoardStore::open_in_memory().unwrap();
+        store.seed_sample_if_empty().unwrap();
+        let request = AttachmentRequest {
+            checkpoint_id: "cp-inbox".to_owned(),
+            project_id: "gareji-core".to_owned(),
+            checkpoint_work_item_id: None,
+            work_item_id: "CORE-2".to_owned(),
+        };
+
+        let receipt = store.attach_checkpoint(&request).unwrap();
+        assert!(!receipt.duplicate);
+        assert_eq!(receipt.attachment.work_item_id, "CORE-2");
+        assert!(store.attach_checkpoint(&request).unwrap().duplicate);
+
+        let mut timeline = ActivityTimeline {
+            activities: vec![activity("cp-inbox", "gareji-core", None, None)],
+            has_older: false,
+        };
+        store.hydrate_activity(&mut timeline).unwrap();
+        assert_eq!(timeline.inbox_count(), 0);
+        assert_eq!(
+            timeline.activities[0].effective_work_item_id(),
+            Some("CORE-2")
+        );
+        assert_eq!(timeline.activities[0].work_item_id, None);
+    }
+
+    #[test]
+    fn attachment_is_final_and_rejects_linked_or_cross_project_activity() {
+        let mut store = SqliteBoardStore::open_in_memory().unwrap();
+        store.seed_sample_if_empty().unwrap();
+        let mut request = AttachmentRequest {
+            checkpoint_id: "cp-final".to_owned(),
+            project_id: "gareji-core".to_owned(),
+            checkpoint_work_item_id: None,
+            work_item_id: "CORE-1".to_owned(),
+        };
+        store.attach_checkpoint(&request).unwrap();
+
+        request.work_item_id = "CORE-2".to_owned();
+        assert!(matches!(
+            store.attach_checkpoint(&request),
+            Err(StoreError::AlreadyAttached)
+        ));
+
+        request.checkpoint_id = "cp-linked".to_owned();
+        request.checkpoint_work_item_id = Some("CORE-1".to_owned());
+        assert!(matches!(
+            store.attach_checkpoint(&request),
+            Err(StoreError::CheckpointAlreadyLinked)
+        ));
+
+        request.checkpoint_id = "cp-cross-project".to_owned();
+        request.checkpoint_work_item_id = None;
+        request.project_id = "gareji-board".to_owned();
+        assert!(matches!(
+            store.attach_checkpoint(&request),
+            Err(StoreError::WorkItemNotFound)
+        ));
+    }
+
+    #[test]
+    fn attached_activity_can_be_reconciled_through_its_effective_link() {
+        let mut store = SqliteBoardStore::open_in_memory().unwrap();
+        store.seed_sample_if_empty().unwrap();
+        store
+            .attach_checkpoint(&AttachmentRequest {
+                checkpoint_id: "cp-attached-review".to_owned(),
+                project_id: "gareji-core".to_owned(),
+                checkpoint_work_item_id: None,
+                work_item_id: "CORE-2".to_owned(),
+            })
+            .unwrap();
+        store
+            .reconcile_checkpoint(&ReconciliationRequest {
+                checkpoint_id: "cp-attached-review".to_owned(),
+                project_id: "gareji-core".to_owned(),
+                work_item_id: "CORE-2".to_owned(),
+                recommended_state: WorkItemState::InReview,
+                decision: ReconciliationDecision::Accepted,
+            })
+            .unwrap();
+        let mut timeline = ActivityTimeline {
+            activities: vec![activity(
+                "cp-attached-review",
+                "gareji-core",
+                None,
+                Some(WorkItemState::InReview),
+            )],
+            has_older: false,
+        };
+
+        store.hydrate_activity(&mut timeline).unwrap();
+        assert_eq!(
+            timeline.activities[0]
+                .reconciliation
+                .as_ref()
+                .unwrap()
+                .decision,
+            ReconciliationDecision::Accepted
+        );
+    }
+
+    #[test]
+    fn opening_a_v2_database_adds_attachment_storage() {
         let connection = Connection::open_in_memory().unwrap();
         connection
             .execute_batch(
@@ -772,37 +1085,43 @@ mod tests {
                    health TEXT NOT NULL,
                    execution_cap INTEGER NOT NULL
                  );
-                 CREATE TABLE board_work_items (
+                  CREATE TABLE board_work_items (
                    id TEXT PRIMARY KEY,
                    project_id TEXT NOT NULL,
                    title TEXT NOT NULL,
-                   state TEXT NOT NULL
-                 );
-                 INSERT INTO board_projects VALUES ('core', 'Core', 'healthy', 1);
-                 INSERT INTO board_work_items VALUES ('CORE-1', 'core', 'Work', 'in_review');
-                 PRAGMA user_version = 1;",
+                    state TEXT NOT NULL
+                  );
+                  CREATE TABLE board_checkpoint_reconciliations (
+                    checkpoint_id TEXT PRIMARY KEY,
+                    project_id TEXT NOT NULL,
+                    work_item_id TEXT NOT NULL,
+                    recommended_state TEXT NOT NULL,
+                    decision TEXT NOT NULL,
+                    previous_state TEXT NOT NULL,
+                    resulting_state TEXT NOT NULL,
+                    decided_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                  );
+                  INSERT INTO board_projects VALUES ('core', 'Core', 'healthy', 1);
+                  INSERT INTO board_work_items VALUES ('CORE-1', 'core', 'Work', 'in_review');
+                  PRAGMA user_version = 2;",
             )
             .unwrap();
         let mut store = SqliteBoardStore::from_connection(connection).unwrap();
 
         let receipt = store
-            .reconcile_checkpoint(&ReconciliationRequest {
-                checkpoint_id: "cp-v1".to_owned(),
+            .attach_checkpoint(&AttachmentRequest {
+                checkpoint_id: "cp-v2".to_owned(),
                 project_id: "core".to_owned(),
+                checkpoint_work_item_id: None,
                 work_item_id: "CORE-1".to_owned(),
-                recommended_state: WorkItemState::Done,
-                decision: ReconciliationDecision::Dismissed,
             })
             .unwrap();
-        assert_eq!(
-            receipt.reconciliation.decision,
-            ReconciliationDecision::Dismissed
-        );
+        assert_eq!(receipt.attachment.work_item_id, "CORE-1");
         let version: i64 = store
             .connection
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 2);
+        assert_eq!(version, 3);
     }
 
     fn activity(
@@ -821,6 +1140,7 @@ mod tests {
             summary: "Progress".to_owned(),
             recommended_state,
             deliveries: Vec::new(),
+            attachment: None,
             reconciliation: None,
         }
     }

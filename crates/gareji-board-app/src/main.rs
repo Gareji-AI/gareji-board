@@ -4,9 +4,10 @@ use std::path::PathBuf;
 use dioxus::prelude::*;
 use gareji_board_core::CoreProgressReader;
 use gareji_board_domain::{
-    ActivityTimeline, CheckpointDeliveryStatus, CheckpointOutcome, CheckpointReconciliation,
-    PortfolioSnapshot, ProjectHealth, ReconciliationDecision, ReconciliationReceipt,
-    ReconciliationRequest, WorkItemState,
+    ActivityTimeline, AttachmentReceipt, AttachmentRequest, CheckpointDeliveryStatus,
+    CheckpointOutcome, CheckpointReconciliation, PortfolioSnapshot, ProgressActivity,
+    ProjectHealth, ReconciliationDecision, ReconciliationReceipt, ReconciliationRequest,
+    WorkItemState, WorkItemSummary,
 };
 use gareji_board_store::{SqliteBoardStore, default_board_database_path};
 
@@ -19,11 +20,13 @@ fn main() {
 #[derive(Clone)]
 struct AppState {
     portfolio: PortfolioSnapshot,
+    work_items: Vec<WorkItemSummary>,
     activity: ActivityTimeline,
     storage_label: String,
     warning: Option<String>,
     activity_warning: Option<String>,
     reconciliation_notice: Option<String>,
+    attachment_notice: Option<String>,
 }
 
 fn load_app_state() -> AppState {
@@ -32,11 +35,12 @@ fn load_app_state() -> AppState {
     let loaded = SqliteBoardStore::open(&database_path).and_then(|mut store| {
         store.seed_sample_if_empty()?;
         let portfolio = store.load_portfolio()?;
-        Ok((store, portfolio))
+        let work_items = store.load_work_items()?;
+        Ok((store, portfolio, work_items))
     });
 
     match loaded {
-        Ok((store, portfolio)) => {
+        Ok((store, portfolio, work_items)) => {
             let project_ids = portfolio
                 .projects
                 .iter()
@@ -56,25 +60,29 @@ fn load_app_state() -> AppState {
                         (loaded.timeline, warning)
                     },
                 );
-            if let Err(error) = store.hydrate_activity_reconciliations(&mut activity) {
-                activity_warning = Some(format!("Reconciliation history: {error}"));
+            if let Err(error) = store.hydrate_activity(&mut activity) {
+                activity_warning = Some(format!("Board activity state: {error}"));
             }
             AppState {
                 portfolio,
+                work_items,
                 activity,
                 storage_label,
                 warning: None,
                 activity_warning,
                 reconciliation_notice: None,
+                attachment_notice: None,
             }
         }
         Err(error) => AppState {
             portfolio: PortfolioSnapshot::default(),
+            work_items: Vec::new(),
             activity: ActivityTimeline::default(),
             storage_label,
             warning: Some(error.to_string()),
             activity_warning: None,
             reconciliation_notice: None,
+            attachment_notice: None,
         },
     }
 }
@@ -91,6 +99,12 @@ fn reconcile(request: &ReconciliationRequest) -> Result<ReconciliationReceipt, S
         .map_err(|error| error.to_string())
 }
 
+fn attach(request: &AttachmentRequest) -> Result<AttachmentReceipt, String> {
+    SqliteBoardStore::open(board_database_path())
+        .and_then(|mut store| store.attach_checkpoint(request))
+        .map_err(|error| error.to_string())
+}
+
 #[allow(non_snake_case)]
 fn App() -> Element {
     let mut state = use_signal(load_app_state);
@@ -99,6 +113,14 @@ fn App() -> Element {
     let active_runs = snapshot.portfolio.active_runs();
     let blocked_items = snapshot.portfolio.blocked_items();
     let delivery_issues = snapshot.activity.delivery_issues();
+    let on_attach = move |request: AttachmentRequest| match attach(&request) {
+        Ok(receipt) => {
+            let mut reloaded = load_app_state();
+            reloaded.attachment_notice = Some(attachment_message(&receipt));
+            state.set(reloaded);
+        }
+        Err(error) => state.write().attachment_notice = Some(error),
+    };
     let on_reconcile = move |request: ReconciliationRequest| match reconcile(&request) {
         Ok(receipt) => {
             let mut reloaded = load_app_state();
@@ -144,6 +166,16 @@ fn App() -> Element {
                 aside { class: "action-notice", "{notice}" }
             }
 
+            if let Some(notice) = &snapshot.attachment_notice {
+                aside { class: "action-notice", "{notice}" }
+            }
+
+            ActivityInbox {
+                activity: snapshot.activity.clone(),
+                work_items: snapshot.work_items.clone(),
+                on_attach,
+            }
+
             RecentActivity {
                 activity: snapshot.activity.clone(),
                 warning: snapshot.activity_warning.clone(),
@@ -161,32 +193,147 @@ fn App() -> Element {
 }
 
 #[component]
+fn ActivityInbox(
+    activity: ActivityTimeline,
+    work_items: Vec<WorkItemSummary>,
+    on_attach: EventHandler<AttachmentRequest>,
+) -> Element {
+    let inbox = activity
+        .activities
+        .into_iter()
+        .filter(ProgressActivity::is_inbox)
+        .collect::<Vec<_>>();
+    let inbox_count = inbox.len();
+    rsx! {
+        section { class: "section-heading",
+            div {
+                p { class: "kicker", "Needs a Work item" }
+                h3 { "Activity Inbox" }
+            }
+            span { "{inbox_count} unlinked" }
+        }
+
+        if inbox.is_empty() {
+            section { class: "inbox-clear",
+                strong { "Inbox clear" }
+                p { "Every recent Checkpoint is connected to a Work item." }
+            }
+        } else {
+            section { class: "inbox-grid", aria_label: "Unlinked progress checkpoints",
+                for item in inbox {
+                    InboxCard {
+                        key: "{item.checkpoint_id}",
+                        item,
+                        work_items: work_items.clone(),
+                        on_attach,
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn InboxCard(
+    item: ProgressActivity,
+    work_items: Vec<WorkItemSummary>,
+    on_attach: EventHandler<AttachmentRequest>,
+) -> Element {
+    let candidates = work_items
+        .into_iter()
+        .filter(|work_item| work_item.project_id == item.project_id)
+        .collect::<Vec<_>>();
+    let initial = candidates
+        .first()
+        .map(|work_item| work_item.id.clone())
+        .unwrap_or_default();
+    let mut selected = use_signal(move || initial);
+    let selected_id = selected.read().clone();
+    let can_attach = !selected_id.is_empty();
+    let request = AttachmentRequest {
+        checkpoint_id: item.checkpoint_id.clone(),
+        project_id: item.project_id.clone(),
+        checkpoint_work_item_id: item.work_item_id.clone(),
+        work_item_id: selected_id.clone(),
+    };
+    rsx! {
+        article { class: "inbox-card",
+            div { class: "activity-head",
+                div { class: "activity-tags",
+                    span { class: outcome_class(item.outcome), "{item.outcome.label()}" }
+                    span { class: "source", "{item.source.label()}" }
+                }
+                time { "{display_time(&item.recorded_at)}" }
+            }
+            h4 { "{item.summary}" }
+            p { class: "activity-link", "{item.project_id} · Unlinked Checkpoint" }
+            if let Some(recommended_state) = item.recommended_state {
+                span { class: "recommendation", "Suggested: {recommended_state}" }
+            }
+            if candidates.is_empty() {
+                p { class: "inbox-unavailable",
+                    "This project has no existing Work items to attach."
+                }
+            } else {
+                div { class: "attachment-actions",
+                    label {
+                        span { "Attach to" }
+                        select {
+                            value: "{selected_id}",
+                            onchange: move |event| selected.set(event.value()),
+                            for candidate in &candidates {
+                                option { value: "{candidate.id}",
+                                    "{candidate.id} · {candidate.title} · {candidate.state}"
+                                }
+                            }
+                        }
+                    }
+                    button {
+                        class: "attach-action",
+                        disabled: !can_attach,
+                        onclick: move |_| on_attach.call(request.clone()),
+                        "Attach"
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[component]
 fn RecentActivity(
     activity: ActivityTimeline,
     warning: Option<String>,
     on_reconcile: EventHandler<ReconciliationRequest>,
 ) -> Element {
+    let has_older = activity.has_older;
+    let linked = activity
+        .activities
+        .into_iter()
+        .filter(|activity| !activity.is_inbox())
+        .collect::<Vec<_>>();
+    let linked_count = linked.len();
     rsx! {
         section { class: "section-heading",
             div {
                 p { class: "kicker", "Evidence from Core" }
                 h3 { "Recent activity" }
             }
-            span { "{activity.activities.len()} checkpoints" }
+            span { "{linked_count} linked checkpoints" }
         }
 
         if let Some(warning) = &warning {
             aside { class: "notice", "Progress history: {warning}" }
         }
 
-        if activity.activities.is_empty() {
+        if linked.is_empty() {
             section { class: "empty-activity",
-                strong { "No progress checkpoints yet" }
-                p { "Connect this Board to Gareji Core, then record work from Runner, MCP, or direct development." }
+                strong { "No linked activity yet" }
+                p { "Attach an Inbox Checkpoint or record progress with an active Work item." }
             }
         } else {
             section { class: "timeline", aria_label: "Recent progress checkpoints",
-                for item in &activity.activities {
+                for item in &linked {
                     article { class: "activity-card", key: "{item.checkpoint_id}",
                         div { class: "activity-marker" }
                         div { class: "activity-body",
@@ -200,8 +347,11 @@ fn RecentActivity(
                             h4 { "{item.summary}" }
                             p { class: "activity-link",
                                 "{item.project_id}"
-                                if let Some(work_item_id) = &item.work_item_id {
+                                if let Some(work_item_id) = item.effective_work_item_id() {
                                     span { " · {work_item_id}" }
+                                }
+                                if item.attachment.is_some() {
+                                    span { class: "attachment-label", " · attached in Board" }
                                 }
                             }
                             div { class: "activity-details",
@@ -225,7 +375,7 @@ fn RecentActivity(
                             ReconciliationPanel {
                                 checkpoint_id: item.checkpoint_id.clone(),
                                 project_id: item.project_id.clone(),
-                                work_item_id: item.work_item_id.clone(),
+                                work_item_id: item.effective_work_item_id().map(str::to_owned),
                                 recommended_state: item.recommended_state,
                                 reconciliation: item.reconciliation.clone(),
                                 on_reconcile,
@@ -234,7 +384,7 @@ fn RecentActivity(
                     }
                 }
             }
-            if activity.has_older {
+            if has_older {
                 p { class: "older-note", "Older checkpoints are available in Core." }
             }
         }
@@ -339,6 +489,20 @@ fn reconciliation_message(receipt: &ReconciliationReceipt) -> String {
             "Suggestion accepted. Work item moved from {} to {}.",
             reconciliation.previous_state, reconciliation.resulting_state
         ),
+    }
+}
+
+fn attachment_message(receipt: &AttachmentReceipt) -> String {
+    if receipt.duplicate {
+        format!(
+            "Checkpoint was already attached to {}.",
+            receipt.attachment.work_item_id
+        )
+    } else {
+        format!(
+            "Checkpoint attached to {} and moved out of the Activity Inbox.",
+            receipt.attachment.work_item_id
+        )
     }
 }
 
