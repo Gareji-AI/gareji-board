@@ -24,6 +24,8 @@ The connection flow shows:
 
 A non-Git directory is valid. A missing, unreadable, or moved directory remains visible as disconnected instead of being silently removed. Board stores the canonical local path needed to find the workspace again, but does not store its source files, Git state, instruction contents, Skill contents, or access grants.
 
+The project card performs a fresh, read-only connection check when it is displayed. It reports whether the selected local directory is available and, when an ancestor contains a `.git` file or directory, the nearest Git repository root. The check does not read source contents, inspect branches or remotes, invoke Git, create a worktree, or change Runner eligibility; Runner repeats its own authoritative preflight immediately before a Run.
+
 ## Skill trust
 
 Bundled Skills are inspectable and enabled in the sample. Project-local Skills may be discovered at `.agents/skills/<skill-id>/SKILL.md` under the connected Execution workspace but remain disabled until the user explicitly enables them for that project. Gareji Board does not download or install remote Skills during onboarding.
