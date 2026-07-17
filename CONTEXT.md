@@ -85,11 +85,11 @@ The single intake for Progress Checkpoints from Runner, MCP, lifecycle Hook, or 
 _Avoid_: synchronizer, Hook, adapter
 
 **Activity Inbox**:
-A holding area for valid Progress Checkpoints that are linked to a Board project but not yet to a Work item. A human can attach them later without losing the original record.
+A holding area for valid Progress Checkpoints that are linked to a Board project but not yet to a Work item. A human can attach them to an existing Work item or create one without losing the original record.
 _Avoid_: backlog, failed sync
 
 **Checkpoint attachment**:
-A final Board-owned association between one project-only Progress Checkpoint and an existing Work item in the same Board project. It does not modify the immutable Checkpoint.
+A final Board-owned association between one project-only Progress Checkpoint and a Work item in the same Board project. The Work item may already exist or be created as part of the attachment; neither path modifies the immutable Checkpoint.
 _Avoid_: checkpoint edit, inferred assignment
 
 **Activity timeline**:

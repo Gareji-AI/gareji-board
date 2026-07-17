@@ -30,7 +30,7 @@ Work item + sourced context + policy
 
 Direct human-Codex work enters at the Progress Recorder instead of the Runner. It therefore produces the same Checkpoint and timeline without pretending that Board started the execution.
 
-The desktop Board reads recent accepted checkpoints through Core's bounded local Bridge and converts them into an Activity timeline. It never opens Core SQLite tables. Project-only checkpoints appear in the Activity Inbox until a person creates a final Board-owned attachment to an existing Work item in the same project; this projection does not rewrite Core's checkpoint. Recommended states remain visible suggestions until a person accepts or dismisses them; an accepted supported recommendation and the Board-owned Work item update are stored atomically. Delivery failures remain visible per destination and never change Work item state.
+The desktop Board reads recent accepted checkpoints through Core's bounded local Bridge and converts them into an Activity timeline. It never opens Core SQLite tables. Project-only checkpoints appear in the Activity Inbox until a person creates a final Board-owned attachment to a Work item in the same project. The target may be selected from existing Work items or created in `todo` together with the attachment; this atomic Board operation does not rewrite Core's checkpoint or apply its recommendation. Recommended states remain visible suggestions until a person accepts or dismisses them; an accepted supported recommendation and the Board-owned Work item update are stored atomically. Delivery failures remain visible per destination and never change Work item state.
 
 ## Replaceable seams
 

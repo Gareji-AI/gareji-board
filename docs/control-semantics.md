@@ -40,7 +40,7 @@ Before selecting new `todo` work, the controller reconciles stale state:
 
 ## Checkpoint recommendation review
 
-Project-only Progress Checkpoints remain in the Activity Inbox until a person attaches one to an existing Work item in the same Board project. Board records the attachment without changing the Core-owned Checkpoint. An identical retry succeeds without creating another record; selecting a different Work item after attachment is rejected so later reconciliation uses one stable Work item identity.
+Project-only Progress Checkpoints remain in the Activity Inbox until a person attaches one to a Work item in the same Board project. The target may be an existing Work item or a new `todo` Work item created atomically with the attachment. Board records the attachment without changing the Core-owned Checkpoint or applying its state recommendation. An identical retry succeeds without creating another record; selecting a different Work item after attachment is rejected so later reconciliation uses one stable Work item identity.
 
 A linked Progress Checkpoint may recommend a Work item state, but Board does not apply it during intake. The Activity timeline offers an explicit accept or dismiss decision. Accepting `in_progress`, `in_review`, `blocked`, or `done` updates the linked non-terminal Work item and records the decision atomically; accepting the current state is an idempotent no-change decision. Dismissing records the judgment without changing state. Recommendations to `backlog`, `todo`, or `cancelled` require a separate explicit Work item action because they represent admission, retry, or termination policy rather than progress reconciliation.
 
