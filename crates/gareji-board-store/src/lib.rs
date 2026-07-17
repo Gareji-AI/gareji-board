@@ -4,15 +4,26 @@ use std::fs;
 use std::path::Path;
 use std::time::Duration;
 
+use directories::ProjectDirs;
 use gareji_board_domain::{
-    PortfolioSnapshot, ProjectHealth, ProjectSummary, WorkItemCounts, WorkItemState,
+    ActiveWorkAssessment, PortfolioSnapshot, ProjectHealth, ProjectSummary, WorkItemCounts,
+    WorkItemState,
 };
-use rusqlite::{Connection, TransactionBehavior, params};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use thiserror::Error;
 
 /// Deep Module that owns Board schema creation, seeding, and portfolio queries.
 pub struct SqliteBoardStore {
     connection: Connection,
+}
+
+/// Resolve the shared local Board database used by the desktop app and bridge.
+#[must_use]
+pub fn default_board_database_path() -> std::path::PathBuf {
+    ProjectDirs::from("dev", "Gareji", "Gareji Board").map_or_else(
+        || std::path::PathBuf::from("gareji-board.sqlite3"),
+        |directories| directories.data_local_dir().join("board.sqlite3"),
+    )
 }
 
 impl SqliteBoardStore {
@@ -206,6 +217,53 @@ impl SqliteBoardStore {
         }
         Ok(PortfolioSnapshot { projects })
     }
+
+    /// Assess one explicit Work item through Board-owned state and project authority.
+    ///
+    /// Unknown or unrelated Work item identities share one not-found result so this
+    /// Interface does not reveal records from another project.
+    ///
+    /// # Errors
+    ///
+    /// Returns a bounded validation, lookup, storage, or corrupt-state error.
+    pub fn assess_active_work(
+        &self,
+        project_id: &str,
+        work_item_id: &str,
+    ) -> Result<ActiveWorkAssessment, StoreError> {
+        validate_id(project_id)?;
+        validate_id(work_item_id)?;
+        let row = self
+            .connection
+            .query_row(
+                "SELECT w.id, w.state
+                 FROM board_projects p
+                 LEFT JOIN board_work_items w
+                   ON w.project_id = p.id AND w.id = ?2
+                 WHERE p.id = ?1",
+                params![project_id, work_item_id],
+                |row| {
+                    Ok((
+                        row.get::<_, Option<String>>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(StoreError::Sqlite)?
+            .ok_or(StoreError::ProjectNotFound)?;
+        let (Some(stored_work_item_id), Some(state)) = row else {
+            return Err(StoreError::WorkItemNotFound);
+        };
+        let state = WorkItemState::try_from(state.as_str())
+            .map_err(|_| StoreError::CorruptState("unknown Work item state"))?;
+        Ok(ActiveWorkAssessment {
+            project_id: project_id.to_owned(),
+            work_item_id: stored_work_item_id,
+            state,
+            eligibility: state.active_work_eligibility(),
+        })
+    }
 }
 
 struct RawProjectSummary {
@@ -247,8 +305,22 @@ fn bounded_u32(value: i64) -> Result<u32, StoreError> {
     u32::try_from(value).map_err(|_| StoreError::CorruptState("numeric value out of range"))
 }
 
+fn validate_id(value: &str) -> Result<(), StoreError> {
+    let length = value.chars().count();
+    if length == 0 || length > 128 {
+        return Err(StoreError::InvalidRequest);
+    }
+    Ok(())
+}
+
 #[derive(Debug, Error)]
 pub enum StoreError {
+    #[error("request did not satisfy the Board contract")]
+    InvalidRequest,
+    #[error("Board project was not found")]
+    ProjectNotFound,
+    #[error("Work item was not found in the requested project")]
+    WorkItemNotFound,
     #[error("could not create the Board data directory")]
     CreateDirectory(#[source] std::io::Error),
     #[error("Board storage operation failed")]
@@ -272,5 +344,44 @@ mod tests {
         assert_eq!(snapshot.projects.len(), 3);
         assert_eq!(snapshot.active_runs(), 1);
         assert_eq!(snapshot.blocked_items(), 1);
+    }
+
+    #[test]
+    fn active_work_assessment_preserves_board_state_authority() {
+        let mut store = SqliteBoardStore::open_in_memory().unwrap();
+        store.seed_sample_if_empty().unwrap();
+
+        let eligible = store.assess_active_work("gareji-core", "CORE-2").unwrap();
+        assert_eq!(eligible.state, WorkItemState::Todo);
+        assert_eq!(
+            eligible.eligibility,
+            gareji_board_domain::ActiveWorkEligibility::Eligible
+        );
+
+        let blocked = store
+            .assess_active_work("zettelkasten-plugin", "ZETTEL-1")
+            .unwrap();
+        assert_eq!(blocked.state, WorkItemState::Blocked);
+        assert_eq!(
+            blocked.eligibility,
+            gareji_board_domain::ActiveWorkEligibility::Ineligible {
+                reason: gareji_board_domain::ActiveWorkIneligibleReason::Blocked
+            }
+        );
+    }
+
+    #[test]
+    fn active_work_assessment_hides_unrelated_work_items() {
+        let mut store = SqliteBoardStore::open_in_memory().unwrap();
+        store.seed_sample_if_empty().unwrap();
+
+        assert!(matches!(
+            store.assess_active_work("gareji-board", "CORE-2"),
+            Err(StoreError::WorkItemNotFound)
+        ));
+        assert!(matches!(
+            store.assess_active_work("missing", "CORE-2"),
+            Err(StoreError::ProjectNotFound)
+        ));
     }
 }

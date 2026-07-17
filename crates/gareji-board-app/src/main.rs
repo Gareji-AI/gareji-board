@@ -1,9 +1,6 @@
-use std::path::PathBuf;
-
 use dioxus::prelude::*;
-use directories::ProjectDirs;
 use gareji_board_domain::{PortfolioSnapshot, ProjectHealth};
-use gareji_board_store::SqliteBoardStore;
+use gareji_board_store::{SqliteBoardStore, default_board_database_path};
 
 const APP_CSS: &str = include_str!("style.css");
 
@@ -19,7 +16,7 @@ struct AppState {
 }
 
 fn load_app_state() -> AppState {
-    let database_path = board_database_path();
+    let database_path = default_board_database_path();
     let storage_label = database_path.display().to_string();
     let loaded = SqliteBoardStore::open(&database_path).and_then(|mut store| {
         store.seed_sample_if_empty()?;
@@ -38,13 +35,6 @@ fn load_app_state() -> AppState {
             warning: Some(error.to_string()),
         },
     }
-}
-
-fn board_database_path() -> PathBuf {
-    ProjectDirs::from("dev", "Gareji", "Gareji Board").map_or_else(
-        || PathBuf::from("gareji-board.sqlite3"),
-        |directories| directories.data_local_dir().join("board.sqlite3"),
-    )
 }
 
 #[allow(non_snake_case)]

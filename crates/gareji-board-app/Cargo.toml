@@ -8,7 +8,6 @@ repository.workspace = true
 
 [dependencies]
 dioxus = { workspace = true, features = ["desktop", "document", "hooks", "html", "launch", "macro", "signals"] }
-directories.workspace = true
 gareji-board-domain.workspace = true
 gareji-board-store.workspace = true
 

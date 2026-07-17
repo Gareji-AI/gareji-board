@@ -30,6 +30,40 @@ impl WorkItemState {
             Self::Cancelled => "cancelled",
         }
     }
+
+    /// Assess whether current direct or Runner work may reference this item.
+    #[must_use]
+    pub const fn active_work_eligibility(self) -> ActiveWorkEligibility {
+        match self {
+            Self::Todo | Self::InProgress | Self::InReview => ActiveWorkEligibility::Eligible,
+            Self::Backlog => ActiveWorkEligibility::Ineligible {
+                reason: ActiveWorkIneligibleReason::NotAdmitted,
+            },
+            Self::Blocked => ActiveWorkEligibility::Ineligible {
+                reason: ActiveWorkIneligibleReason::Blocked,
+            },
+            Self::Done | Self::Cancelled => ActiveWorkEligibility::Ineligible {
+                reason: ActiveWorkIneligibleReason::Terminal,
+            },
+        }
+    }
+}
+
+impl TryFrom<&str> for WorkItemState {
+    type Error = UnknownWorkItemState;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "backlog" => Ok(Self::Backlog),
+            "todo" => Ok(Self::Todo),
+            "in_progress" => Ok(Self::InProgress),
+            "in_review" => Ok(Self::InReview),
+            "blocked" => Ok(Self::Blocked),
+            "done" => Ok(Self::Done),
+            "cancelled" => Ok(Self::Cancelled),
+            _ => Err(UnknownWorkItemState),
+        }
+    }
 }
 
 impl fmt::Display for WorkItemState {
@@ -91,6 +125,44 @@ impl fmt::Display for UnknownProjectHealth {
 }
 
 impl std::error::Error for UnknownProjectHealth {}
+
+/// Stored Work item state violated the domain vocabulary.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct UnknownWorkItemState;
+
+impl fmt::Display for UnknownWorkItemState {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("unknown Work item state")
+    }
+}
+
+impl std::error::Error for UnknownWorkItemState {}
+
+/// Board-owned result of deciding whether work may reference one Work item.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum ActiveWorkEligibility {
+    Eligible,
+    Ineligible { reason: ActiveWorkIneligibleReason },
+}
+
+/// Stable reasons that a Work item cannot be selected as active work.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ActiveWorkIneligibleReason {
+    NotAdmitted,
+    Blocked,
+    Terminal,
+}
+
+/// Attributed active-work assessment returned by Board.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ActiveWorkAssessment {
+    pub project_id: String,
+    pub work_item_id: String,
+    pub state: WorkItemState,
+    pub eligibility: ActiveWorkEligibility,
+}
 
 /// Counts needed by the portfolio screen without exposing storage rows.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -159,5 +231,39 @@ mod tests {
 
         assert_eq!(snapshot.active_runs(), 2);
         assert_eq!(snapshot.blocked_items(), 1);
+    }
+
+    #[test]
+    fn active_work_eligibility_is_owned_by_work_item_state() {
+        for eligible in [
+            WorkItemState::Todo,
+            WorkItemState::InProgress,
+            WorkItemState::InReview,
+        ] {
+            assert_eq!(
+                eligible.active_work_eligibility(),
+                ActiveWorkEligibility::Eligible
+            );
+        }
+        assert_eq!(
+            WorkItemState::Backlog.active_work_eligibility(),
+            ActiveWorkEligibility::Ineligible {
+                reason: ActiveWorkIneligibleReason::NotAdmitted
+            }
+        );
+        assert_eq!(
+            WorkItemState::Blocked.active_work_eligibility(),
+            ActiveWorkEligibility::Ineligible {
+                reason: ActiveWorkIneligibleReason::Blocked
+            }
+        );
+        for terminal in [WorkItemState::Done, WorkItemState::Cancelled] {
+            assert_eq!(
+                terminal.active_work_eligibility(),
+                ActiveWorkEligibility::Ineligible {
+                    reason: ActiveWorkIneligibleReason::Terminal
+                }
+            );
+        }
     }
 }
