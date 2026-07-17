@@ -47,7 +47,24 @@ struct AppState {
     autopilot_preview: Option<SafeAutopilotPreview>,
 }
 
-type NewAgentProfileSignals = (Signal<String>, Signal<String>, Signal<String>);
+#[derive(Clone, Copy)]
+struct NewAgentProfileSignals {
+    profile_id: Signal<String>,
+    role: Signal<String>,
+    capabilities: Signal<String>,
+    instruction_ref: Signal<String>,
+    skill_refs: Signal<String>,
+}
+
+fn use_new_agent_profile_signals() -> NewAgentProfileSignals {
+    NewAgentProfileSignals {
+        profile_id: use_signal(String::new),
+        role: use_signal(String::new),
+        capabilities: use_signal(String::new),
+        instruction_ref: use_signal(String::new),
+        skill_refs: use_signal(String::new),
+    }
+}
 
 fn load_app_state() -> AppState {
     let database_path = board_database_path();
@@ -210,9 +227,11 @@ fn handle_agent_profile(
     match save_agent_profile(request) {
         Ok(receipt) => {
             if receipt.previous.is_none() {
-                form.0.set(String::new());
-                form.1.set(String::new());
-                form.2.set(String::new());
+                form.profile_id.set(String::new());
+                form.role.set(String::new());
+                form.capabilities.set(String::new());
+                form.instruction_ref.set(String::new());
+                form.skill_refs.set(String::new());
             }
             let mut reloaded = load_app_state();
             reloaded.agent_profile_notice = Some(agent_profile_message(&receipt));
@@ -225,10 +244,7 @@ fn handle_agent_profile(
 #[allow(non_snake_case)]
 fn App() -> Element {
     let mut state = use_signal(load_app_state);
-    let new_profile_id = use_signal(String::new);
-    let new_profile_role = use_signal(String::new);
-    let new_profile_capabilities = use_signal(String::new);
-    let new_profile_form = (new_profile_id, new_profile_role, new_profile_capabilities);
+    let new_profile_form = use_new_agent_profile_signals();
     let snapshot = state.read().clone();
     let project_count = snapshot.portfolio.projects.len();
     let active_runs = snapshot.portfolio.active_runs();
@@ -315,9 +331,11 @@ fn App() -> Element {
             AgentProfileCatalog {
                 agent_profiles: snapshot.agent_profiles.clone(),
                 work_items: snapshot.work_items.clone(),
-                new_profile_id,
-                new_profile_role,
-                new_profile_capabilities,
+                new_profile_id: new_profile_form.profile_id,
+                new_profile_role: new_profile_form.role,
+                new_profile_capabilities: new_profile_form.capabilities,
+                new_profile_instruction_ref: new_profile_form.instruction_ref,
+                new_profile_skill_refs: new_profile_form.skill_refs,
                 on_save: on_agent_profile,
             }
 
@@ -722,6 +740,8 @@ fn AgentProfileCatalog(
     new_profile_id: Signal<String>,
     new_profile_role: Signal<String>,
     new_profile_capabilities: Signal<String>,
+    new_profile_instruction_ref: Signal<String>,
+    new_profile_skill_refs: Signal<String>,
     on_save: EventHandler<AgentProfileSaveRequest>,
 ) -> Element {
     let profile_count = agent_profiles.len();
@@ -741,6 +761,8 @@ fn AgentProfileCatalog(
                 profile_id: new_profile_id,
                 role: new_profile_role,
                 capability_input: new_profile_capabilities,
+                instruction_ref_input: new_profile_instruction_ref,
+                skill_ref_input: new_profile_skill_refs,
                 on_save,
             }
             div { class: "agent-profile-grid",
@@ -769,18 +791,26 @@ fn NewAgentProfileForm(
     mut profile_id: Signal<String>,
     mut role: Signal<String>,
     mut capability_input: Signal<String>,
+    mut instruction_ref_input: Signal<String>,
+    mut skill_ref_input: Signal<String>,
     on_save: EventHandler<AgentProfileSaveRequest>,
 ) -> Element {
     let profile_id_value = profile_id.read().clone();
     let role_value = role.read().clone();
     let capability_input_value = capability_input.read().clone();
+    let instruction_ref_input_value = instruction_ref_input.read().clone();
+    let skill_ref_input_value = skill_ref_input.read().clone();
     let capabilities = parse_agent_capabilities(&capability_input_value);
+    let instruction_ref = parse_agent_instruction_ref(&instruction_ref_input_value);
+    let skill_refs = parse_agent_skill_refs(&skill_ref_input_value);
     let duplicate_id = existing_profiles
         .iter()
         .any(|profile| profile.id == profile_id_value);
     let can_create = agent_profile_id_is_valid(&profile_id_value)
         && agent_role_is_valid(&role_value)
         && capability_input_is_valid(&capability_input_value)
+        && instruction_ref_input_is_valid(&instruction_ref_input_value)
+        && skill_ref_input_is_valid(&skill_ref_input_value)
         && !duplicate_id;
     let request = AgentProfileSaveRequest {
         expected: None,
@@ -788,6 +818,8 @@ fn NewAgentProfileForm(
             id: profile_id_value.clone(),
             role: role_value.trim().to_owned(),
             capabilities,
+            instruction_ref,
+            skill_refs,
         },
     };
     rsx! {
@@ -820,6 +852,14 @@ fn NewAgentProfileForm(
                     label: "Declared capabilities",
                     on_change: move |value| capability_input.set(value),
                 }
+                AgentInstructionInput {
+                    value: instruction_ref_input_value,
+                    on_change: move |value| instruction_ref_input.set(value),
+                }
+                AgentSkillInput {
+                    value: skill_ref_input_value,
+                    on_change: move |value| skill_ref_input.set(value),
+                }
                 if duplicate_id {
                     p { class: "field-warning", "That Agent profile ID already exists." }
                 }
@@ -841,18 +881,28 @@ fn AgentProfileCard(
 ) -> Element {
     let initial_role = profile.role.clone();
     let initial_capabilities = profile.capabilities.join(", ");
+    let initial_instruction_ref = profile.instruction_ref.clone().unwrap_or_default();
+    let initial_skill_refs = profile.skill_refs.join(", ");
     let mut role = use_signal(move || initial_role);
     let mut capability_input = use_signal(move || initial_capabilities);
+    let mut instruction_ref_input = use_signal(move || initial_instruction_ref);
+    let mut skill_ref_input = use_signal(move || initial_skill_refs);
     let role_value = role.read().clone();
     let capability_input_value = capability_input.read().clone();
+    let instruction_ref_input_value = instruction_ref_input.read().clone();
+    let skill_ref_input_value = skill_ref_input.read().clone();
     let target = AgentProfileSummary {
         id: profile.id.clone(),
         role: role_value.trim().to_owned(),
         capabilities: parse_agent_capabilities(&capability_input_value),
+        instruction_ref: parse_agent_instruction_ref(&instruction_ref_input_value),
+        skill_refs: parse_agent_skill_refs(&skill_ref_input_value),
     };
     let can_save = target != profile
         && agent_role_is_valid(&role_value)
-        && capability_input_is_valid(&capability_input_value);
+        && capability_input_is_valid(&capability_input_value)
+        && instruction_ref_input_is_valid(&instruction_ref_input_value)
+        && skill_ref_input_is_valid(&skill_ref_input_value);
     let request = AgentProfileSaveRequest {
         expected: Some(profile.clone()),
         target,
@@ -861,6 +911,15 @@ fn AgentProfileCard(
         "No capabilities".to_owned()
     } else {
         profile.capabilities.join(", ")
+    };
+    let instruction_label = profile
+        .instruction_ref
+        .as_deref()
+        .unwrap_or("Not configured");
+    let skill_label = if profile.skill_refs.is_empty() {
+        "No Skills".to_owned()
+    } else {
+        profile.skill_refs.join(", ")
     };
     rsx! {
         article { class: "agent-profile-card",
@@ -872,6 +931,16 @@ fn AgentProfileCard(
                 span { "{profile.capabilities.len()} capabilities" }
             }
             p { class: "agent-profile-capabilities", "{capability_label}" }
+            dl { class: "agent-profile-behavior",
+                div {
+                    dt { "Instructions" }
+                    dd { code { "{instruction_label}" } }
+                }
+                div {
+                    dt { "Skills" }
+                    dd { "{skill_label}" }
+                }
+            }
             details {
                 summary { "Edit profile" }
                 div { class: "agent-profile-form compact",
@@ -888,6 +957,14 @@ fn AgentProfileCard(
                         value: capability_input_value,
                         label: "Declared capabilities",
                         on_change: move |value| capability_input.set(value),
+                    }
+                    AgentInstructionInput {
+                        value: instruction_ref_input_value,
+                        on_change: move |value| instruction_ref_input.set(value),
+                    }
+                    AgentSkillInput {
+                        value: skill_ref_input_value,
+                        on_change: move |value| skill_ref_input.set(value),
                     }
                     button {
                         class: "agent-profile-action",
@@ -918,6 +995,44 @@ fn AgentCapabilityInput(
                 oninput: move |event| on_change.call(event.value()),
             }
             small { "Separate capabilities with commas. Leave blank for none." }
+        }
+    }
+}
+
+#[component]
+fn AgentInstructionInput(value: String, on_change: EventHandler<String>) -> Element {
+    rsx! {
+        label {
+            span { "Instruction file" }
+            input {
+                aria_label: "Agent instruction reference",
+                value: "{value}",
+                maxlength: 512,
+                placeholder: "agents/researcher/AGENT.md",
+                oninput: move |event| on_change.call(event.value()),
+            }
+            small {
+                "Optional path relative to the Execution workspace. The file is resolved before a Run."
+            }
+        }
+    }
+}
+
+#[component]
+fn AgentSkillInput(value: String, on_change: EventHandler<String>) -> Element {
+    rsx! {
+        label {
+            span { "Skill references" }
+            input {
+                aria_label: "Agent Skill references",
+                value: "{value}",
+                maxlength: 512,
+                placeholder: "web-research, evidence-summary",
+                oninput: move |event| on_change.call(event.value()),
+            }
+            small {
+                "Stable Skill IDs separated with commas. References do not install or enable a Skill."
+            }
         }
     }
 }
@@ -1229,7 +1344,7 @@ fn AutopilotPreviewPanel(preview: SafeAutopilotPreview) -> Element {
                         div { class: "preview-candidate-body",
                             h4 { "{candidate.work_item.title}" }
                             p {
-                                "{candidate.project_name} is at {candidate.active_runs}/{candidate.execution_cap} active capacity. {candidate.agent_profile.role} is assigned and satisfies every required Agent capability. This item is priority {candidate.work_item.priority}."
+                                "{candidate.project_name} is at {candidate.active_runs}/{candidate.execution_cap} active capacity. {candidate.agent_role} is assigned and satisfies every required Agent capability. This item is priority {candidate.work_item.priority}."
                             }
                             div { class: "preview-facts",
                                 span { "Board gates passed" }
@@ -1390,6 +1505,48 @@ fn capability_input_is_valid(value: &str) -> bool {
             .map(str::trim)
             .filter(|capability| !capability.is_empty())
             .all(|capability| capability.chars().count() <= 64)
+}
+
+fn parse_agent_instruction_ref(value: &str) -> Option<String> {
+    let value = value.trim();
+    (!value.is_empty()).then(|| value.to_owned())
+}
+
+fn instruction_ref_input_is_valid(value: &str) -> bool {
+    let value = value.trim();
+    value.is_empty() || agent_instruction_ref_is_valid(value)
+}
+
+fn agent_instruction_ref_is_valid(value: &str) -> bool {
+    let invalid_segment = value
+        .split('/')
+        .any(|segment| segment.is_empty() || matches!(segment, "." | ".."));
+    value.chars().count() <= 512
+        && !value.starts_with('/')
+        && !value.contains(['\\', ':'])
+        && !value.chars().any(char::is_control)
+        && !invalid_segment
+}
+
+fn parse_agent_skill_refs(value: &str) -> Vec<String> {
+    let mut skill_refs = value
+        .split(',')
+        .map(str::trim)
+        .filter(|skill_ref| !skill_ref.is_empty())
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    skill_refs.sort();
+    skill_refs.dedup();
+    skill_refs
+}
+
+fn skill_ref_input_is_valid(value: &str) -> bool {
+    value.chars().count() <= 512
+        && value
+            .split(',')
+            .map(str::trim)
+            .filter(|skill_ref| !skill_ref.is_empty())
+            .all(agent_profile_id_is_valid)
 }
 
 fn agent_profile_id_is_valid(value: &str) -> bool {
@@ -1645,11 +1802,15 @@ mod tests {
                 id: "reviewer".to_owned(),
                 role: "Reviewer".to_owned(),
                 capabilities: vec!["testing".to_owned(), "review".to_owned()],
+                instruction_ref: None,
+                skill_refs: Vec::new(),
             },
             AgentProfileSummary {
                 id: "implementer".to_owned(),
                 role: "Implementer".to_owned(),
                 capabilities: vec!["implementation".to_owned(), "testing".to_owned()],
+                instruction_ref: None,
+                skill_refs: Vec::new(),
             },
         ];
 
@@ -1691,6 +1852,21 @@ mod tests {
         assert!(!agent_profile_id_is_valid("-reviewer"));
         assert!(agent_role_is_valid("Quality reviewer"));
         assert!(!agent_role_is_valid("   "));
+        assert_eq!(
+            parse_agent_instruction_ref(" agents/qa/AGENT.md "),
+            Some("agents/qa/AGENT.md".to_owned())
+        );
+        assert!(instruction_ref_input_is_valid("agents/qa/AGENT.md"));
+        assert!(!instruction_ref_input_is_valid("../AGENT.md"));
+        assert!(!instruction_ref_input_is_valid("C:/agents/AGENT.md"));
+        assert_eq!(
+            parse_agent_skill_refs(" review-work-item, evidence-summary, review-work-item "),
+            vec!["evidence-summary".to_owned(), "review-work-item".to_owned()]
+        );
+        assert!(skill_ref_input_is_valid(
+            "review-work-item, evidence-summary"
+        ));
+        assert!(!skill_ref_input_is_valid("Remote Skill"));
     }
 
     #[test]

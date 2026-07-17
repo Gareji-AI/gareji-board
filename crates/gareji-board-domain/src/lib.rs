@@ -535,6 +535,8 @@ pub struct AgentProfileSummary {
     pub id: String,
     pub role: String,
     pub capabilities: Vec<String>,
+    pub instruction_ref: Option<String>,
+    pub skill_refs: Vec<String>,
 }
 
 /// Explicit human intent to create or replace one Board-owned Agent profile.
@@ -672,7 +674,8 @@ impl AutopilotDecision {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AutopilotCandidate {
     pub work_item: WorkItemSummary,
-    pub agent_profile: AgentProfileSummary,
+    pub agent_profile_id: String,
+    pub agent_role: String,
     pub project_name: String,
     pub active_runs: u32,
     pub execution_cap: u32,
@@ -845,7 +848,8 @@ impl SafeAutopilotPreview {
             }
             SafeAutopilotOutcome::Candidate(AutopilotCandidate {
                 work_item: work_item.clone(),
-                agent_profile: agent_profile.clone(),
+                agent_profile_id: agent_profile.id.clone(),
+                agent_role: agent_profile.role.clone(),
                 project_name: project.name.clone(),
                 active_runs: project.work_items.in_progress,
                 execution_cap: project.execution_cap,
@@ -1292,7 +1296,8 @@ mod tests {
             panic!("expected a candidate")
         };
         assert_eq!(candidate.work_item.id, "BOARD-3");
-        assert_eq!(candidate.agent_profile.id, "implementer");
+        assert_eq!(candidate.agent_profile_id, "implementer");
+        assert_eq!(candidate.agent_role, "Implementer");
         assert!(preview.skipped.iter().any(|skip| {
             skip.work_item.id == "BOARD-1" && skip.reason == CandidateSkipReason::AgentNotAssigned
         }));
@@ -1411,6 +1416,8 @@ mod tests {
             id: "implementer".to_owned(),
             role: "Implementer".to_owned(),
             capabilities: vec!["implementation".to_owned(), "testing".to_owned()],
+            instruction_ref: None,
+            skill_refs: Vec::new(),
         }]
     }
 

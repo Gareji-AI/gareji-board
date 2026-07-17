@@ -126,6 +126,11 @@ button, input, select { font: inherit; }
 .agent-profile-card-head code { color: #7fa9c8; font-size: 10px; }
 .agent-profile-card-head > span { flex: none; color: #829088; font-size: 9px; }
 .agent-profile-capabilities { min-height: 30px; margin: 13px 0; color: #aeb9b3; font-size: 11px; line-height: 1.5; }
+.agent-profile-behavior { display: grid; gap: 8px; margin: 0 0 13px; }
+.agent-profile-behavior > div { display: grid; grid-template-columns: 72px minmax(0, 1fr); gap: 8px; align-items: start; }
+.agent-profile-behavior dt { color: #74827a; font-size: 9px; text-transform: uppercase; letter-spacing: .08em; }
+.agent-profile-behavior dd { min-width: 0; margin: 0; color: #aeb9b3; font-size: 10px; line-height: 1.45; overflow-wrap: anywhere; }
+.agent-profile-behavior code { color: #93b9d6; font-size: 9px; }
 .agent-profile-card details { border-top: 1px solid #29332e; }
 .agent-profile-card summary { padding-top: 11px; color: #a6d4ff; cursor: pointer; font-size: 10px; font-weight: 700; }
 .agent-profile-form { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; padding: 4px 15px 15px; border-top: 1px solid #304039; }

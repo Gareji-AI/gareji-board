@@ -76,12 +76,19 @@ impl SqliteBoardStore {
                  );
                  CREATE TABLE IF NOT EXISTS board_agent_profiles (
                    id TEXT PRIMARY KEY,
-                   role TEXT NOT NULL
+                   role TEXT NOT NULL,
+                   instruction_ref TEXT
                  );
                  CREATE TABLE IF NOT EXISTS board_agent_profile_capabilities (
                    agent_profile_id TEXT NOT NULL,
                    capability TEXT NOT NULL,
                    PRIMARY KEY (agent_profile_id, capability),
+                   FOREIGN KEY (agent_profile_id) REFERENCES board_agent_profiles(id) ON DELETE CASCADE
+                 );
+                 CREATE TABLE IF NOT EXISTS board_agent_profile_skills (
+                   agent_profile_id TEXT NOT NULL,
+                   skill_ref TEXT NOT NULL,
+                   PRIMARY KEY (agent_profile_id, skill_ref),
                    FOREIGN KEY (agent_profile_id) REFERENCES board_agent_profiles(id) ON DELETE CASCADE
                  );
                  CREATE TABLE IF NOT EXISTS board_work_items (
@@ -149,10 +156,9 @@ impl SqliteBoardStore {
                     ON board_checkpoint_attachments(project_id, work_item_id, attached_at);",
             )
             .map_err(StoreError::Sqlite)?;
+        migrate_agent_profile_columns(&connection)?;
         migrate_work_item_columns(&connection)?;
-        connection
-            .execute_batch("PRAGMA user_version = 6;")
-            .map_err(StoreError::Sqlite)?;
+        set_schema_version(&connection)?;
         Ok(Self { connection })
     }
 
@@ -239,7 +245,7 @@ impl SqliteBoardStore {
     pub fn load_agent_profiles(&self) -> Result<Vec<AgentProfileSummary>, StoreError> {
         let mut statement = self
             .connection
-            .prepare("SELECT id, role FROM board_agent_profiles ORDER BY id")
+            .prepare("SELECT id, role, instruction_ref FROM board_agent_profiles ORDER BY id")
             .map_err(StoreError::Sqlite)?;
         let rows = statement
             .query_map([], |row| {
@@ -247,6 +253,8 @@ impl SqliteBoardStore {
                     id: row.get(0)?,
                     role: row.get(1)?,
                     capabilities: Vec::new(),
+                    instruction_ref: row.get(2)?,
+                    skill_refs: Vec::new(),
                 })
             })
             .map_err(StoreError::Sqlite)?;
@@ -280,6 +288,29 @@ impl SqliteBoardStore {
                 .copied()
                 .ok_or(StoreError::CorruptState("capability owner is missing"))?;
             profiles[index].capabilities.push(capability);
+        }
+        drop(capability_statement);
+
+        let mut skill_statement = self
+            .connection
+            .prepare(
+                "SELECT agent_profile_id, skill_ref
+                 FROM board_agent_profile_skills
+                 ORDER BY agent_profile_id, skill_ref",
+            )
+            .map_err(StoreError::Sqlite)?;
+        let skill_refs = skill_statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(StoreError::Sqlite)?;
+        for skill_ref in skill_refs {
+            let (agent_profile_id, skill_ref) = skill_ref.map_err(StoreError::Sqlite)?;
+            let index = positions
+                .get(&agent_profile_id)
+                .copied()
+                .ok_or(StoreError::CorruptState("Skill reference owner is missing"))?;
+            profiles[index].skill_refs.push(skill_ref);
         }
         Ok(profiles)
     }
@@ -331,15 +362,18 @@ impl SqliteBoardStore {
         if stored.is_none() {
             transaction
                 .execute(
-                    "INSERT INTO board_agent_profiles (id, role) VALUES (?1, ?2)",
-                    params![target.id, target.role],
+                    "INSERT INTO board_agent_profiles (id, role, instruction_ref)
+                     VALUES (?1, ?2, ?3)",
+                    params![target.id, target.role, target.instruction_ref],
                 )
                 .map_err(StoreError::Sqlite)?;
         } else {
             let changed = transaction
                 .execute(
-                    "UPDATE board_agent_profiles SET role = ?1 WHERE id = ?2",
-                    params![target.role, target.id],
+                    "UPDATE board_agent_profiles
+                     SET role = ?1, instruction_ref = ?2
+                     WHERE id = ?3",
+                    params![target.role, target.instruction_ref, target.id],
                 )
                 .map_err(StoreError::Sqlite)?;
             if changed != 1 {
@@ -352,6 +386,13 @@ impl SqliteBoardStore {
                     [&target.id],
                 )
                 .map_err(StoreError::Sqlite)?;
+            transaction
+                .execute(
+                    "DELETE FROM board_agent_profile_skills
+                     WHERE agent_profile_id = ?1",
+                    [&target.id],
+                )
+                .map_err(StoreError::Sqlite)?;
         }
         for capability in &target.capabilities {
             transaction
@@ -360,6 +401,16 @@ impl SqliteBoardStore {
                        (agent_profile_id, capability)
                      VALUES (?1, ?2)",
                     params![target.id, capability],
+                )
+                .map_err(StoreError::Sqlite)?;
+        }
+        for skill_ref in &target.skill_refs {
+            transaction
+                .execute(
+                    "INSERT INTO board_agent_profile_skills
+                       (agent_profile_id, skill_ref)
+                     VALUES (?1, ?2)",
+                    params![target.id, skill_ref],
                 )
                 .map_err(StoreError::Sqlite)?;
         }
@@ -1032,6 +1083,24 @@ fn migrate_work_item_columns(connection: &Connection) -> Result<(), StoreError> 
     Ok(())
 }
 
+fn migrate_agent_profile_columns(connection: &Connection) -> Result<(), StoreError> {
+    if !table_column_exists(connection, "board_agent_profiles", "instruction_ref")? {
+        connection
+            .execute(
+                "ALTER TABLE board_agent_profiles ADD COLUMN instruction_ref TEXT",
+                [],
+            )
+            .map_err(StoreError::Sqlite)?;
+    }
+    Ok(())
+}
+
+fn set_schema_version(connection: &Connection) -> Result<(), StoreError> {
+    connection
+        .execute_batch("PRAGMA user_version = 7;")
+        .map_err(StoreError::Sqlite)
+}
+
 fn insert_sample_projects(transaction: &rusqlite::Transaction<'_>) -> Result<(), StoreError> {
     let projects = [
         ("gareji-board", "Gareji Board", "healthy", 2_i64),
@@ -1057,12 +1126,32 @@ fn insert_sample_projects(transaction: &rusqlite::Transaction<'_>) -> Result<(),
 
 fn insert_sample_agent_profiles(transaction: &rusqlite::Transaction<'_>) -> Result<(), StoreError> {
     let profiles = [
-        ("implementer", "Implementer", ["implementation", "testing"]),
-        ("researcher", "Researcher", ["evidence", "research"]),
-        ("reviewer", "Reviewer", ["review", "testing"]),
-        ("release-checker", "Release checker", ["release", "testing"]),
+        (
+            "implementer",
+            "Implementer",
+            ["implementation", "testing"],
+            ["implement-bounded-work-item", "write-project-handoff"],
+        ),
+        (
+            "researcher",
+            "Researcher",
+            ["evidence", "research"],
+            ["summarize-project-context", "write-project-handoff"],
+        ),
+        (
+            "reviewer",
+            "Reviewer",
+            ["review", "testing"],
+            ["review-work-item", "write-project-handoff"],
+        ),
+        (
+            "release-checker",
+            "Release checker",
+            ["release", "testing"],
+            ["review-work-item", "write-project-handoff"],
+        ),
     ];
-    for (id, role, capabilities) in profiles {
+    for (id, role, capabilities, skill_refs) in profiles {
         transaction
             .execute(
                 "INSERT INTO board_agent_profiles (id, role) VALUES (?1, ?2)",
@@ -1076,6 +1165,16 @@ fn insert_sample_agent_profiles(transaction: &rusqlite::Transaction<'_>) -> Resu
                        (agent_profile_id, capability)
                      VALUES (?1, ?2)",
                     params![id, capability],
+                )
+                .map_err(StoreError::Sqlite)?;
+        }
+        for skill_ref in skill_refs {
+            transaction
+                .execute(
+                    "INSERT INTO board_agent_profile_skills
+                       (agent_profile_id, skill_ref)
+                     VALUES (?1, ?2)",
+                    params![id, skill_ref],
                 )
                 .map_err(StoreError::Sqlite)?;
         }
@@ -1204,14 +1303,20 @@ fn insert_sample_work_item_relationships(
 }
 
 fn work_item_column_exists(connection: &Connection, column: &str) -> Result<bool, StoreError> {
+    table_column_exists(connection, "board_work_items", column)
+}
+
+fn table_column_exists(
+    connection: &Connection,
+    table: &str,
+    column: &str,
+) -> Result<bool, StoreError> {
     connection
         .query_row(
             "SELECT EXISTS(
-               SELECT 1
-               FROM pragma_table_info('board_work_items')
-               WHERE name = ?1
+               SELECT 1 FROM pragma_table_info(?1) WHERE name = ?2
              )",
-            [column],
+            params![table, column],
             |row| row.get(0),
         )
         .map_err(StoreError::Sqlite)
@@ -1301,13 +1406,16 @@ fn load_agent_profile(
 ) -> Result<Option<AgentProfileSummary>, StoreError> {
     let Some(mut profile) = connection
         .query_row(
-            "SELECT id, role FROM board_agent_profiles WHERE id = ?1",
+            "SELECT id, role, instruction_ref
+             FROM board_agent_profiles WHERE id = ?1",
             [agent_profile_id],
             |row| {
                 Ok(AgentProfileSummary {
                     id: row.get(0)?,
                     role: row.get(1)?,
                     capabilities: Vec::new(),
+                    instruction_ref: row.get(2)?,
+                    skill_refs: Vec::new(),
                 })
             },
         )
@@ -1328,6 +1436,21 @@ fn load_agent_profile(
         .query_map([agent_profile_id], |row| row.get::<_, String>(0))
         .map_err(StoreError::Sqlite)?;
     profile.capabilities = capabilities
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(StoreError::Sqlite)?;
+    drop(statement);
+    let mut statement = connection
+        .prepare(
+            "SELECT skill_ref
+             FROM board_agent_profile_skills
+             WHERE agent_profile_id = ?1
+             ORDER BY skill_ref",
+        )
+        .map_err(StoreError::Sqlite)?;
+    let skill_refs = statement
+        .query_map([agent_profile_id], |row| row.get::<_, String>(0))
+        .map_err(StoreError::Sqlite)?;
+    profile.skill_refs = skill_refs
         .collect::<Result<Vec<_>, _>>()
         .map_err(StoreError::Sqlite)?;
     Ok(Some(profile))
@@ -1501,22 +1624,33 @@ fn validate_title(value: &str) -> Result<(), StoreError> {
 fn canonical_agent_profile(
     profile: &AgentProfileSummary,
 ) -> Result<AgentProfileSummary, StoreError> {
-    validate_agent_profile_id(&profile.id)?;
+    validate_stable_identifier(&profile.id)?;
     validate_agent_role(&profile.role)?;
+    if let Some(instruction_ref) = &profile.instruction_ref {
+        validate_instruction_ref(instruction_ref)?;
+    }
     let mut capabilities = profile.capabilities.clone();
     for capability in &capabilities {
         validate_capability(capability)?;
     }
     capabilities.sort();
     capabilities.dedup();
+    let mut skill_refs = profile.skill_refs.clone();
+    for skill_ref in &skill_refs {
+        validate_stable_identifier(skill_ref)?;
+    }
+    skill_refs.sort();
+    skill_refs.dedup();
     Ok(AgentProfileSummary {
         id: profile.id.clone(),
         role: profile.role.clone(),
         capabilities,
+        instruction_ref: profile.instruction_ref.clone(),
+        skill_refs,
     })
 }
 
-fn validate_agent_profile_id(value: &str) -> Result<(), StoreError> {
+fn validate_stable_identifier(value: &str) -> Result<(), StoreError> {
     let length = value.chars().count();
     let mut characters = value.chars();
     let Some(first) = characters.next() else {
@@ -1531,6 +1665,22 @@ fn validate_agent_profile_id(value: &str) -> Result<(), StoreError> {
                 || character.is_ascii_digit()
                 || matches!(character, '-' | '_')
         })
+    {
+        return Err(StoreError::InvalidRequest);
+    }
+    Ok(())
+}
+
+fn validate_instruction_ref(value: &str) -> Result<(), StoreError> {
+    let invalid_segment = value
+        .split('/')
+        .any(|segment| segment.is_empty() || matches!(segment, "." | ".."));
+    if value.chars().count() > 512
+        || value.trim() != value
+        || value.starts_with('/')
+        || value.contains(['\\', ':'])
+        || value.chars().any(char::is_control)
+        || invalid_segment
     {
         return Err(StoreError::InvalidRequest);
     }
@@ -1758,6 +1908,12 @@ mod tests {
                     "evidence".to_owned(),
                     "testing".to_owned(),
                 ],
+                instruction_ref: Some("agents/qa/AGENT.md".to_owned()),
+                skill_refs: vec![
+                    "review-work-item".to_owned(),
+                    "evidence-summary".to_owned(),
+                    "review-work-item".to_owned(),
+                ],
             },
         };
 
@@ -1767,6 +1923,10 @@ mod tests {
         assert_eq!(
             created.resulting.capabilities,
             vec!["evidence".to_owned(), "testing".to_owned()]
+        );
+        assert_eq!(
+            created.resulting.skill_refs,
+            vec!["evidence-summary".to_owned(), "review-work-item".to_owned()]
         );
         let unchanged = store
             .save_agent_profile(&AgentProfileSaveRequest {
@@ -1836,6 +1996,36 @@ mod tests {
                     id: "Invalid ID".to_owned(),
                     role: "Invalid".to_owned(),
                     capabilities: Vec::new(),
+                    instruction_ref: None,
+                    skill_refs: Vec::new(),
+                },
+            }),
+            Err(StoreError::InvalidRequest)
+        ));
+        for instruction_ref in ["../AGENT.md", "/agents/AGENT.md", "agents\\AGENT.md"] {
+            assert!(matches!(
+                store.save_agent_profile(&AgentProfileSaveRequest {
+                    expected: None,
+                    target: AgentProfileSummary {
+                        id: "invalid-instructions".to_owned(),
+                        role: "Invalid instructions".to_owned(),
+                        capabilities: Vec::new(),
+                        instruction_ref: Some(instruction_ref.to_owned()),
+                        skill_refs: Vec::new(),
+                    },
+                }),
+                Err(StoreError::InvalidRequest)
+            ));
+        }
+        assert!(matches!(
+            store.save_agent_profile(&AgentProfileSaveRequest {
+                expected: None,
+                target: AgentProfileSummary {
+                    id: "invalid-skill".to_owned(),
+                    role: "Invalid Skill".to_owned(),
+                    capabilities: Vec::new(),
+                    instruction_ref: None,
+                    skill_refs: vec!["Remote Skill".to_owned()],
                 },
             }),
             Err(StoreError::InvalidRequest)
@@ -2282,7 +2472,7 @@ mod tests {
             .connection
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 6);
+        assert_eq!(version, 7);
         let priority: i64 = store
             .connection
             .query_row(
@@ -2334,6 +2524,48 @@ mod tests {
             )
             .unwrap();
         assert!(agent_profile_table_exists);
+        assert_agent_behavior_schema(&store);
+    }
+
+    #[test]
+    fn opening_a_v6_database_adds_agent_behavior_references() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE board_agent_profiles (
+                   id TEXT PRIMARY KEY,
+                   role TEXT NOT NULL
+                 );
+                 INSERT INTO board_agent_profiles VALUES ('reviewer', 'Reviewer');
+                 PRAGMA user_version = 6;",
+            )
+            .unwrap();
+
+        let store = SqliteBoardStore::from_connection(connection).unwrap();
+        let profiles = store.load_agent_profiles().unwrap();
+        assert_eq!(profiles.len(), 1);
+        assert_eq!(profiles[0].instruction_ref, None);
+        assert!(profiles[0].skill_refs.is_empty());
+        assert_agent_behavior_schema(&store);
+    }
+
+    fn assert_agent_behavior_schema(store: &SqliteBoardStore) {
+        assert!(
+            table_column_exists(&store.connection, "board_agent_profiles", "instruction_ref")
+                .unwrap()
+        );
+        let skill_table_exists: bool = store
+            .connection
+            .query_row(
+                "SELECT EXISTS(
+                   SELECT 1 FROM sqlite_master
+                   WHERE type = 'table' AND name = 'board_agent_profile_skills'
+                 )",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(skill_table_exists);
     }
 
     fn activity(
