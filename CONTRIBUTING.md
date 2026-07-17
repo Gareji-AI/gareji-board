@@ -12,8 +12,10 @@ Gareji Board is currently a private pre-release project. These rules prepare a p
 ## Verification
 
 ```bash
-python -m pip install -r requirements-dev.txt
-python scripts/validate.py
+cargo fmt --all --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+cargo xtask validate
 ```
 
 ## Commits

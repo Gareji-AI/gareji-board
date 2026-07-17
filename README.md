@@ -57,4 +57,6 @@ Private local scaffold. No remote repository, publication, or release has been c
 
 See [the product brief](docs/product-brief.md), [the onboarding design](docs/onboarding-design.md), [the control semantics](docs/control-semantics.md), [the Runner design](docs/runner-design.md), and [the demo fixture](examples/demo-board.json).
 
-Validate the current documentation, schemas, references, and public-data hygiene with `python scripts/validate.py`. Contribution and security expectations are documented in [CONTRIBUTING.md](CONTRIBUTING.md) and [SECURITY.md](SECURITY.md).
+Run the current Rust desktop shell with `cargo run -p gareji-board-app`. It creates disposable sample coordination state in the operating system's local application-data directory; Core and Runner execution are not wired yet.
+
+Validate code, documentation, schemas, references, and public-data hygiene with `cargo test --workspace` and `cargo xtask validate`. Contribution and security expectations are documented in [CONTRIBUTING.md](CONTRIBUTING.md) and [SECURITY.md](SECURITY.md).

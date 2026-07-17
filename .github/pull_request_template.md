@@ -8,7 +8,7 @@
 
 ## Verification
 
-<!-- Include `python scripts/validate.py` when applicable. -->
+<!-- Include Rust checks and `cargo xtask validate` when applicable. -->
 
 ## Authority and safety
 

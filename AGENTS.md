@@ -18,8 +18,10 @@ Do not move raw execution logs, credentials, arbitrary shell commands, provider-
 ## Checks
 
 ```bash
-python -m pip install -r requirements-dev.txt
-python scripts/validate.py
+cargo fmt --all --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+cargo xtask validate
 ```
 
 ## Change discipline
