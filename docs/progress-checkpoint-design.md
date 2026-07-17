@@ -57,6 +57,8 @@ The first Board approval flow records one final reconciliation decision per link
 
 The preferred link is an explicit Work item selected in Gareji Board or passed to `gareji checkpoint`. If no Work item is supplied, the Recorder resolves the connected execution workspace and places the checkpoint in that project's Activity Inbox.
 
+The Activity Inbox lists these project-only checkpoints separately from linked Activity. A person may attach one to an existing Work item in the same Board project. Board stores that final association as a projection keyed by Checkpoint ID, while the Core-owned Checkpoint keeps its original empty `work_item_id`; identical retries are idempotent and a later different target is rejected.
+
 `gareji task start <work-item-id>` stores the active Work item for the connected Execution workspace. The active selection remains available while Gareji Board is closed and is cleared explicitly or when the Work item reaches a terminal state.
 
 Branch names and text matches may be shown as suggestions but never silently assign a Work item. If no connected execution workspace matches the current directory, recording fails locally with a bounded diagnostic and does not write into an unrelated project.

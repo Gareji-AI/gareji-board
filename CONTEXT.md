@@ -88,6 +88,10 @@ _Avoid_: synchronizer, Hook, adapter
 A holding area for valid Progress Checkpoints that are linked to a Board project but not yet to a Work item. A human can attach them later without losing the original record.
 _Avoid_: backlog, failed sync
 
+**Checkpoint attachment**:
+A final Board-owned association between one project-only Progress Checkpoint and an existing Work item in the same Board project. It does not modify the immutable Checkpoint.
+_Avoid_: checkpoint edit, inferred assignment
+
 **Activity timeline**:
 The Board's read-only chronological view of accepted Progress Checkpoints, state recommendations, and delivery results. It presents Core-owned progress evidence without becoming another checkpoint ledger or applying Work item transitions.
 _Avoid_: task history, mutable log
