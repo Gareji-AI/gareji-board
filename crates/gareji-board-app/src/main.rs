@@ -595,27 +595,67 @@ fn WorkItemControl(
     on_transition: EventHandler<WorkItemTransitionRequest>,
 ) -> Element {
     let work_item_count = work_items.len();
+    let lanes = group_work_items_by_state(work_items);
     rsx! {
         section { class: "section-heading",
             div {
                 p { class: "kicker", "State authority" }
-                h3 { "Work items" }
+                h3 { "Work item Kanban" }
             }
             span { "{work_item_count} total" }
         }
 
-        if work_items.is_empty() {
+        if work_item_count == 0 {
             section { class: "empty-work-items",
                 strong { "No Work items yet" }
                 p { "Create one from an Activity Inbox Checkpoint to begin." }
             }
         } else {
-            section { class: "work-item-grid", aria_label: "Board Work items",
-                for item in work_items {
-                    WorkItemCard {
-                        key: "{item.id}",
-                        item,
+            section { class: "kanban-board", aria_label: "Work item Kanban board",
+                for (state, lane_items) in lanes {
+                    KanbanLane {
+                        key: "{state.as_str()}",
+                        state,
+                        work_items: lane_items,
                         on_transition,
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn KanbanLane(
+    state: WorkItemState,
+    work_items: Vec<WorkItemSummary>,
+    on_transition: EventHandler<WorkItemTransitionRequest>,
+) -> Element {
+    let item_count = work_items.len();
+    let state_label = work_item_state_label(state);
+    let item_noun = if item_count == 1 { "item" } else { "items" };
+    rsx! {
+        section {
+            class: kanban_lane_class(state),
+            aria_label: "{state_label} lane, {item_count} {item_noun}",
+            header { class: "kanban-lane-head",
+                div { class: "kanban-lane-title",
+                    span { class: "kanban-lane-marker", aria_hidden: "true" }
+                    h4 { "{state_label}" }
+                }
+                span { class: "kanban-count", "{item_count}" }
+            }
+            p { class: "kanban-lane-hint", "{work_item_eligibility_label(state)}" }
+            div { class: "kanban-lane-items",
+                if work_items.is_empty() {
+                    p { class: "kanban-empty", "No items" }
+                } else {
+                    for item in work_items {
+                        WorkItemCard {
+                            key: "{item.id}",
+                            item,
+                            on_transition,
+                        }
                     }
                 }
             }
@@ -682,6 +722,30 @@ fn WorkItemCard(
     }
 }
 
+fn group_work_items_by_state(
+    work_items: Vec<WorkItemSummary>,
+) -> Vec<(WorkItemState, Vec<WorkItemSummary>)> {
+    let mut grouped: [Vec<WorkItemSummary>; WORK_ITEM_STATES.len()] =
+        std::array::from_fn(|_| Vec::new());
+    for item in work_items {
+        grouped[work_item_state_index(item.state)].push(item);
+    }
+
+    WORK_ITEM_STATES.into_iter().zip(grouped).collect()
+}
+
+fn work_item_state_index(state: WorkItemState) -> usize {
+    match state {
+        WorkItemState::Backlog => 0,
+        WorkItemState::Todo => 1,
+        WorkItemState::InProgress => 2,
+        WorkItemState::InReview => 3,
+        WorkItemState::Blocked => 4,
+        WorkItemState::Done => 5,
+        WorkItemState::Cancelled => 6,
+    }
+}
+
 fn work_item_state_label(state: WorkItemState) -> &'static str {
     match state {
         WorkItemState::Backlog => "Backlog",
@@ -691,6 +755,18 @@ fn work_item_state_label(state: WorkItemState) -> &'static str {
         WorkItemState::Blocked => "Blocked",
         WorkItemState::Done => "Done",
         WorkItemState::Cancelled => "Cancelled",
+    }
+}
+
+fn kanban_lane_class(state: WorkItemState) -> &'static str {
+    match state {
+        WorkItemState::Backlog => "kanban-lane lane-backlog",
+        WorkItemState::Todo => "kanban-lane lane-todo",
+        WorkItemState::InProgress => "kanban-lane lane-running",
+        WorkItemState::InReview => "kanban-lane lane-review",
+        WorkItemState::Blocked => "kanban-lane lane-blocked",
+        WorkItemState::Done => "kanban-lane lane-done",
+        WorkItemState::Cancelled => "kanban-lane lane-cancelled",
     }
 }
 
@@ -795,6 +871,39 @@ mod tests {
 
         assert_eq!(suggest_work_item_id("gareji-core", &candidates), "CORE-5");
         assert_eq!(suggest_work_item_id("new-project", &[]), "PROJECT-1");
+    }
+
+    #[test]
+    fn work_items_are_grouped_into_canonical_kanban_order() {
+        let lanes = group_work_items_by_state(vec![
+            WorkItemSummary {
+                id: "BOARD-2".to_owned(),
+                project_id: "gareji-board".to_owned(),
+                title: "Second".to_owned(),
+                state: WorkItemState::Blocked,
+            },
+            WorkItemSummary {
+                id: "BOARD-1".to_owned(),
+                project_id: "gareji-board".to_owned(),
+                title: "First".to_owned(),
+                state: WorkItemState::Todo,
+            },
+        ]);
+
+        assert_eq!(lanes.len(), WORK_ITEM_STATES.len());
+        assert_eq!(
+            lanes.iter().map(|(state, _)| *state).collect::<Vec<_>>(),
+            WORK_ITEM_STATES
+        );
+        assert_eq!(
+            lanes[work_item_state_index(WorkItemState::Todo)].1[0].id,
+            "BOARD-1"
+        );
+        assert_eq!(
+            lanes[work_item_state_index(WorkItemState::Blocked)].1[0].id,
+            "BOARD-2"
+        );
+        assert_eq!(lanes.iter().map(|(_, items)| items.len()).sum::<usize>(), 2);
     }
 }
 

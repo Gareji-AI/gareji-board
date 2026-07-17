@@ -86,8 +86,24 @@ button, input, select { font: inherit; }
 .empty-activity { padding: 28px; border: 1px dashed #35413c; border-radius: 12px; text-align: center; background: rgba(18, 24, 21, .55); }
 .empty-activity p { margin: 8px 0 0; color: #839089; font-size: 13px; }
 .older-note { margin: 12px 0 0 31px; color: #78867f; font-size: 11px; }
-.work-item-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
-.work-item-card { min-width: 0; padding: 20px; border: 1px solid #2b3531; border-radius: 12px; background: linear-gradient(145deg, rgba(22, 30, 26, .96), rgba(15, 20, 18, .96)); }
+.kanban-board { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(270px, 300px); align-items: start; gap: 14px; padding: 2px 2px 14px; overflow-x: auto; overscroll-behavior-inline: contain; scroll-snap-type: inline proximity; scrollbar-color: #43534c #171d1a; }
+.kanban-lane { --lane-accent: #8f9b95; min-width: 0; height: clamp(360px, 62vh, 620px); display: flex; flex-direction: column; padding: 16px 12px 12px; border: 1px solid #2b3531; border-top: 2px solid var(--lane-accent); border-radius: 12px; background: rgba(17, 23, 20, .82); scroll-snap-align: start; }
+.lane-backlog { --lane-accent: #89938e; }
+.lane-todo { --lane-accent: #79b9ef; }
+.lane-running { --lane-accent: #72dca1; }
+.lane-review { --lane-accent: #a994ef; }
+.lane-blocked { --lane-accent: #e5a45f; }
+.lane-done { --lane-accent: #5fc78c; }
+.lane-cancelled { --lane-accent: #7d8782; }
+.kanban-lane-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 0 4px; }
+.kanban-lane-title { display: flex; align-items: center; gap: 9px; min-width: 0; }
+.kanban-lane-title h4 { margin: 0; font-size: 13px; letter-spacing: .01em; }
+.kanban-lane-marker { flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--lane-accent); box-shadow: 0 0 0 3px rgba(255, 255, 255, .035); }
+.kanban-count { min-width: 24px; padding: 4px 7px; border-radius: 999px; color: #c0cac5; background: #27302c; text-align: center; font-size: 10px; font-weight: 750; }
+.kanban-lane-hint { min-height: 28px; margin: 9px 4px 13px; color: #78867f; font-size: 10px; line-height: 1.4; }
+.kanban-lane-items { min-height: 0; flex: 1; display: grid; align-content: start; gap: 10px; padding-right: 3px; overflow-y: auto; scrollbar-color: #43534c transparent; }
+.kanban-empty { margin: 0; padding: 28px 10px; border: 1px dashed #35413c; border-radius: 10px; color: #68756f; text-align: center; font-size: 11px; }
+.work-item-card { min-width: 0; padding: 15px; border: 1px solid #303b36; border-radius: 10px; background: linear-gradient(145deg, rgba(25, 33, 29, .98), rgba(16, 21, 19, .98)); box-shadow: 0 8px 24px rgba(0, 0, 0, .12); }
 .work-item-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
 .work-item-head h4 { margin: 7px 0 0; font-size: 16px; line-height: 1.35; }
 .work-item-id { margin: 0; color: #8ca097; font-size: 10px; font-weight: 750; letter-spacing: .12em; text-transform: uppercase; }
@@ -101,7 +117,7 @@ button, input, select { font: inherit; }
 .state-blocked { color: #ffc98f; background: #3b2919; }
 .state-done { color: #8ff0b8; background: #173625; }
 .state-cancelled { color: #b3bbb7; background: #303432; }
-.work-item-actions { display: flex; align-items: end; gap: 10px; margin-top: 18px; padding-top: 15px; border-top: 1px solid #2a322f; }
+.work-item-actions { display: flex; align-items: stretch; flex-direction: column; gap: 10px; margin-top: 16px; padding-top: 14px; border-top: 1px solid #2a322f; }
 .work-item-actions label { min-width: 0; flex: 1; display: grid; gap: 7px; color: #8f9b95; font-size: 11px; }
 .work-item-actions select { width: 100%; min-width: 0; padding: 9px 10px; border: 1px solid #3c4943; border-radius: 8px; color: #ece8df; background: #181d1a; }
 .transition-action { padding: 9px 13px; border: 1px solid #397b55; border-radius: 8px; color: #a3efc1; background: #173625; cursor: pointer; font-size: 11px; font-weight: 750; white-space: nowrap; }
@@ -127,7 +143,6 @@ button, input, select { font: inherit; }
 @media (max-width: 1040px) {
   .shell { width: calc(100% - 40px); }
   .inbox-grid { grid-template-columns: 1fr; }
-  .work-item-grid { grid-template-columns: 1fr; }
   .project-grid { grid-template-columns: 1fr 1fr; }
 }
 
@@ -143,5 +158,5 @@ button, input, select { font: inherit; }
   .reconciliation-actions { align-items: flex-start; flex-direction: column; }
   .attachment-actions { align-items: stretch; flex-direction: column; }
   .creation-actions { grid-template-columns: 1fr; align-items: stretch; }
-  .work-item-actions { align-items: stretch; flex-direction: column; }
+  .kanban-board { grid-auto-columns: minmax(258px, calc(100vw - 64px)); }
 }
