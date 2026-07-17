@@ -66,6 +66,14 @@ _Avoid_: capability grant, automatic approval
 A stable Board-owned description of an agent role, its declared Agent capabilities, and references to its instructions and execution configuration. It is not a running agent or a model selection.
 _Avoid_: agent process, model, prompt
 
+**Agent instruction reference**:
+An optional portable path from an Execution workspace to a versioned file that defines an Agent profile's behavior. It identifies instructions without copying their contents into Board data.
+_Avoid_: prompt text, model configuration, absolute path
+
+**Skill reference**:
+A stable identifier associating an Agent profile with a versioned Skill that may be resolved for an Execution workspace. It neither installs the Skill nor grants execution permission.
+_Avoid_: Agent capability, Core capability, Skill contents
+
 **Agent capability**:
 A Board scheduling claim that an Agent profile is suitable for a kind of work. It is distinct from a Core capability, which grants permission for a concrete execution operation.
 _Avoid_: Core capability, Skill, permission

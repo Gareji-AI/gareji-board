@@ -58,11 +58,15 @@ An Agent plan may deliberately be unassigned or require a capability that no cur
 
 ## Explicit Agent profile management
 
-The Agent catalog lets a person create a Board-owned Agent profile or atomically replace an existing profile's role and declared Agent capabilities. A profile ID is a stable lowercase identifier and cannot be renamed after creation. The v0 control surface does not delete profiles because Work items may still refer to them.
+The Agent catalog lets a person create a Board-owned Agent profile or atomically replace an existing profile's role, declared Agent capabilities, optional Agent instruction reference, and Skill references. A profile ID is a stable lowercase identifier and cannot be renamed after creation. The v0 control surface does not delete profiles because Work items may still refer to them.
 
-An edit request carries the complete Agent profile the person observed; Board rejects the change when the stored role or capabilities changed first instead of overwriting newer coordination. Saving an identical existing profile is an idempotent no-op. A profile with no declared capabilities is valid, but it cannot satisfy a Work item with capability requirements.
+An edit request carries the complete Agent profile the person observed; Board rejects the change when the stored role, capabilities, or references changed first instead of overwriting newer coordination. Saving an identical existing profile is an idempotent no-op. A profile with no declared capabilities is valid, but it cannot satisfy a Work item with capability requirements. An Agent instruction reference is optional, and a profile may have no Skill references.
 
-Changing a profile does not rewrite any Work item's Agent plan. Because Safe Autopilot evaluates the current catalog, removing a declared capability can immediately make an assigned Work item ineligible until a person repairs the profile or Work item. Profile management does not create a Run, select a model, attach instructions or Skills, or grant Core capability.
+An Agent instruction reference is a forward-slash relative path from an Execution workspace to one versioned instruction file. Absolute paths, empty path segments, `.` segments, `..` traversal, backslashes, and control characters are rejected. Skill references use the same stable lowercase identifier form as Agent profiles and are stored in stable lexical order without duplicates.
+
+Board validates the shape of these references but does not copy instruction contents, install Skills, or require every reference to resolve while the profile is being edited. This keeps a profile portable across projects. A future Runner preflight must resolve the instruction file and every enabled Skill for the selected Execution workspace and fail closed before starting when it cannot. The current read-only candidate preview remains a scheduling assessment rather than that execution preflight.
+
+Changing a profile does not rewrite any Work item's Agent plan. Because Safe Autopilot evaluates the current catalog, removing a declared capability can immediately make an assigned Work item ineligible until a person repairs the profile or Work item. Profile management does not create a Run, select a model, grant Core capability, or treat instruction and Skill references as trusted execution authority.
 
 ## Controller stop and fast exit
 
