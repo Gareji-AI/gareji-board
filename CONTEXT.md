@@ -74,6 +74,10 @@ _Avoid_: prompt text, model configuration, absolute path
 A stable identifier associating an Agent profile with a versioned Skill that may be resolved for an Execution workspace. It neither installs the Skill nor grants execution permission.
 _Avoid_: Agent capability, Core capability, Skill contents
 
+**Agent behavior inspection**:
+A Board-owned, read-only assessment of whether an Agent profile's instruction and Skill references are present inside one selected Execution workspace. It does not read their contents, enable a Skill, establish trust, or replace Runner preflight.
+_Avoid_: execution preflight, Skill trust, instruction loading
+
 **Agent capability**:
 A Board scheduling claim that an Agent profile is suitable for a kind of work. It is distinct from a Core capability, which grants permission for a concrete execution operation.
 _Avoid_: Core capability, Skill, permission

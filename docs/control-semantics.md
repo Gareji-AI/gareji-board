@@ -68,6 +68,14 @@ Board validates the shape of these references but does not copy instruction cont
 
 Changing a profile does not rewrite any Work item's Agent plan. Because Safe Autopilot evaluates the current catalog, removing a declared capability can immediately make an assigned Work item ineligible until a person repairs the profile or Work item. Profile management does not create a Run, select a model, grant Core capability, or treat instruction and Skill references as trusted execution authority.
 
+## Read-only Agent behavior inspection
+
+The Agent catalog may inspect one profile against a selected Execution workspace. The inspection checks only filesystem identity and containment: the instruction reference must resolve to a regular file below the canonical workspace root, and each Skill reference must resolve to `.agents/skills/<skill-id>/SKILL.md` below that same root. Missing files are reported separately from unsafe references that escape through a symbolic link or other canonical path change. An unavailable workspace produces one bounded workspace result instead of treating every reference as missing.
+
+A profile with no instruction and no Skills is reported as having no configured behavior references rather than as invalid. When every configured reference resolves, Board reports the references as present, not trusted or runnable. Inspection never reads or displays file contents, installs or enables Skills, changes the profile, starts a Run, or grants Core capability. Runner must repeat authoritative preflight in the isolated Run workspace immediately before execution and fail closed if the result changed.
+
+The bundled demo keeps its inspectable instructions and Skills in a separate demo Execution workspace fixture. The Markdown demo Knowledge workspace contains project context only, preserving the authority boundary between knowledge and executable agent configuration.
+
 ## Controller stop and fast exit
 
 A controller-wide `decision=stop` means no candidate may start during that tick. The current compatibility rules stop when:

@@ -4,9 +4,9 @@ Gareji Board has two first-launch paths. Both produce the same Board project mod
 
 ## Open sample
 
-`gareji-board demo` creates a disposable session from the bundled fixture, then opens the Board. The session includes three sample projects, four agent profiles, four inspectable Skills, safe autopilot settings, and example success and blocked outcomes.
+`gareji-board demo` creates a disposable session from the bundled fixture, then opens the Board. The session includes three sample projects, four agent profiles, four inspectable instruction files, four inspectable Skills, safe autopilot settings, and example success and blocked outcomes.
 
-The launcher copies writable demo material into an application-owned session directory. It never writes into the bundled fixture, a personal knowledge workspace, or an existing source repository. The user can reset the session to its original state.
+The launcher copies writable demo material into an application-owned session directory. Knowledge notes come from the demo Knowledge workspace; Agent instructions and Skills come from the separate demo Execution workspace fixture. It never writes into either bundled fixture, a personal knowledge workspace, or an existing source repository. The user can reset the session to its original state.
 
 ## Add existing project
 
@@ -26,7 +26,7 @@ A non-Git directory is valid. A missing, unreadable, or moved directory remains 
 
 ## Skill trust
 
-Bundled Skills are inspectable and enabled in the sample. Project-local Skills may be discovered under a configured skill directory but remain disabled until the user explicitly enables them for that project. Gareji Board does not download or install remote Skills during onboarding.
+Bundled Skills are inspectable and enabled in the sample. Project-local Skills may be discovered at `.agents/skills/<skill-id>/SKILL.md` under the connected Execution workspace but remain disabled until the user explicitly enables them for that project. Gareji Board does not download or install remote Skills during onboarding.
 
 Agent profiles reference Skills by stable ID. Instructions, Skills, runtime, and model remain separate choices so a user can change the model without redefining the agent.
 
