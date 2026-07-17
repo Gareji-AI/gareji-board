@@ -2031,6 +2031,24 @@ fn workspace_repository_label(inspection: &ExecutionWorkspaceInspection) -> Stri
     }
 }
 
+fn workspace_skill_discovery_note(
+    availability: WorkspaceAvailability,
+    has_no_skills: bool,
+) -> &'static str {
+    if !has_no_skills {
+        return "";
+    }
+    match availability {
+        WorkspaceAvailability::BundledSample => {
+            "Bundled sample Skills are inspected from the Agent catalog."
+        }
+        WorkspaceAvailability::Available => "No project-local Skills were detected.",
+        WorkspaceAvailability::Unavailable => {
+            "Skill discovery is unavailable until the directory returns."
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2234,6 +2252,11 @@ fn ProjectCard(
     let availability_label = workspace_availability_label(workspace_inspection.availability);
     let availability_class = workspace_availability_class(workspace_inspection.availability);
     let repository_label = workspace_repository_label(&workspace_inspection);
+    let discovered_skill_ids = workspace_inspection.discovered_skill_ids.clone();
+    let skill_discovery_note = workspace_skill_discovery_note(
+        workspace_inspection.availability,
+        discovered_skill_ids.is_empty(),
+    );
     let can_connect = !workspace_location_value.trim().is_empty();
     let project_id = project.id.clone();
     let expected = execution_workspace.clone();
@@ -2265,6 +2288,19 @@ fn ProjectCard(
                     div {
                         dt { "Repository" }
                         dd { "{repository_label}" }
+                    }
+                }
+                div { class: "workspace-discovered-skills",
+                    span { "Discovered Skills" }
+                    if discovered_skill_ids.is_empty() {
+                        p { "{skill_discovery_note}" }
+                    } else {
+                        ul {
+                            for skill_id in discovered_skill_ids {
+                                li { code { "{skill_id}" } }
+                            }
+                        }
+                        small { "Detected only; enabling and trust remain separate." }
                     }
                 }
                 label {

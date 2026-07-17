@@ -243,6 +243,12 @@ button, input, select { font: inherit; }
 .workspace-state-sample { color: #aeb9b4; background: #29312e; }
 .workspace-state-available { color: #98e3b9; background: #183523; }
 .workspace-state-unavailable { color: #ffc98f; background: #3a2d15; }
+.workspace-discovered-skills { display: grid; gap: 6px; }
+.workspace-discovered-skills > span { color: #77887f; font-size: 9px; text-transform: uppercase; letter-spacing: .07em; }
+.workspace-discovered-skills p, .workspace-discovered-skills small { margin: 0; color: #78867f; font-size: 9px; line-height: 1.4; }
+.workspace-discovered-skills ul { display: flex; flex-wrap: wrap; gap: 5px; margin: 0; padding: 0; list-style: none; }
+.workspace-discovered-skills li { padding: 3px 5px; border: 1px solid #30443a; border-radius: 5px; color: #9bc2ae; background: #15221b; }
+.workspace-discovered-skills code { color: inherit; font-size: 8px; }
 .execution-workspace-connection label { display: grid; gap: 5px; }
 .execution-workspace-connection input { width: 100%; min-width: 0; box-sizing: border-box; padding: 8px 9px; border: 1px solid #3b5146; border-radius: 7px; color: #e8eee9; background: #151b18; font-size: 10px; }
 .workspace-connect-action { justify-self: start; padding: 7px 10px; border: 1px solid #37694c; border-radius: 7px; color: #b9f0cf; background: #183523; cursor: pointer; font-size: 10px; font-weight: 750; }
