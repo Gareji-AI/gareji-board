@@ -537,6 +537,42 @@ pub struct AgentProfileSummary {
     pub capabilities: Vec<String>,
 }
 
+/// Board-owned scheduling intent for one Work item.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct AgentPlan {
+    pub agent_profile_id: Option<String>,
+    pub required_capabilities: Vec<String>,
+}
+
+impl WorkItemSummary {
+    /// Project the current assignment and capability requirements as one plan.
+    #[must_use]
+    pub fn agent_plan(&self) -> AgentPlan {
+        AgentPlan {
+            agent_profile_id: self.agent_profile_id.clone(),
+            required_capabilities: self.required_capabilities.clone(),
+        }
+    }
+}
+
+/// Explicit human intent to replace one Work item's complete Agent plan.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AgentPlanUpdateRequest {
+    pub project_id: String,
+    pub work_item_id: String,
+    pub expected: AgentPlan,
+    pub target: AgentPlan,
+}
+
+/// Durable result of one explicit Agent plan update attempt.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AgentPlanUpdateReceipt {
+    pub work_item_id: String,
+    pub previous: AgentPlan,
+    pub resulting: AgentPlan,
+    pub changed: bool,
+}
+
 /// Explicit human intent to change one Board-owned Work item state.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorkItemTransitionRequest {

@@ -153,6 +153,19 @@ button, input, select { font: inherit; }
 .state-blocked { color: #ffc98f; background: #3b2919; }
 .state-done { color: #8ff0b8; background: #173625; }
 .state-cancelled { color: #b3bbb7; background: #303432; }
+.agent-plan-editor { margin-top: 14px; border: 1px solid #314039; border-radius: 9px; background: rgba(20, 29, 25, .7); }
+.agent-plan-editor summary { padding: 10px 12px; color: #a6d4ff; cursor: pointer; font-size: 11px; font-weight: 750; }
+.agent-plan-fields { display: grid; gap: 12px; padding: 2px 12px 12px; border-top: 1px solid #2b3832; }
+.agent-plan-fields > label { display: grid; gap: 7px; padding-top: 11px; color: #8f9b95; font-size: 11px; }
+.agent-plan-fields select { width: 100%; min-width: 0; padding: 9px 10px; border: 1px solid #3c4943; border-radius: 8px; color: #ece8df; background: #181d1a; }
+.capability-picker { min-width: 0; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px; margin: 0; padding: 10px; border: 1px solid #33413b; border-radius: 8px; }
+.capability-picker legend { padding: 0 5px; color: #8f9b95; font-size: 10px; }
+.capability-picker p { grid-column: 1 / -1; margin: 0; color: #78867f; font-size: 10px; }
+.capability-choice { min-width: 0; display: flex; align-items: center; gap: 6px; color: #b8c4be; font-size: 10px; }
+.capability-choice input { accent-color: #64d593; }
+.capability-choice span { overflow: hidden; text-overflow: ellipsis; }
+.agent-plan-action { padding: 9px 13px; border: 1px solid #315f7c; border-radius: 8px; color: #b8deff; background: #183148; cursor: pointer; font-size: 11px; font-weight: 750; }
+.agent-plan-action:disabled { opacity: .45; cursor: not-allowed; }
 .work-item-actions { display: flex; align-items: stretch; flex-direction: column; gap: 10px; margin-top: 16px; padding-top: 14px; border-top: 1px solid #2a322f; }
 .work-item-actions label { min-width: 0; flex: 1; display: grid; gap: 7px; color: #8f9b95; font-size: 11px; }
 .work-item-actions select { width: 100%; min-width: 0; padding: 9px 10px; border: 1px solid #3c4943; border-radius: 8px; color: #ece8df; background: #181d1a; }

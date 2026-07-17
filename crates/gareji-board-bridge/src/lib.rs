@@ -138,6 +138,7 @@ fn map_store_error(request_id: String, error: &StoreError) -> BoardBridgeRespons
             "Work item was not found in the requested project",
         ),
         StoreError::CheckpointAlreadyLinked
+        | StoreError::AgentProfileNotFound
         | StoreError::WorkItemAlreadyExists
         | StoreError::AlreadyAttached
         | StoreError::AlreadyReconciled

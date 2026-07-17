@@ -4,12 +4,13 @@ use std::path::PathBuf;
 use dioxus::prelude::*;
 use gareji_board_core::CoreProgressReader;
 use gareji_board_domain::{
-    ActivityTimeline, AgentProfileSummary, ApprovalRequirement, AttachmentReceipt,
-    AttachmentRequest, AttachmentTarget, AutopilotStopReason, CandidateSkipReason,
-    CheckpointDeliveryStatus, CheckpointOutcome, CheckpointReconciliation, NoCandidateReason,
-    PortfolioSnapshot, ProgressActivity, ProjectHealth, ReconciliationDecision,
-    ReconciliationReceipt, ReconciliationRequest, SafeAutopilotOutcome, SafeAutopilotPreview,
-    WorkItemState, WorkItemSummary, WorkItemTransitionReceipt, WorkItemTransitionRequest,
+    ActivityTimeline, AgentPlan, AgentPlanUpdateReceipt, AgentPlanUpdateRequest,
+    AgentProfileSummary, ApprovalRequirement, AttachmentReceipt, AttachmentRequest,
+    AttachmentTarget, AutopilotStopReason, CandidateSkipReason, CheckpointDeliveryStatus,
+    CheckpointOutcome, CheckpointReconciliation, NoCandidateReason, PortfolioSnapshot,
+    ProgressActivity, ProjectHealth, ReconciliationDecision, ReconciliationReceipt,
+    ReconciliationRequest, SafeAutopilotOutcome, SafeAutopilotPreview, WorkItemState,
+    WorkItemSummary, WorkItemTransitionReceipt, WorkItemTransitionRequest,
 };
 use gareji_board_store::{SqliteBoardStore, default_board_database_path};
 
@@ -41,6 +42,7 @@ struct AppState {
     reconciliation_notice: Option<String>,
     attachment_notice: Option<String>,
     transition_notice: Option<String>,
+    agent_plan_notice: Option<String>,
     autopilot_preview: Option<SafeAutopilotPreview>,
 }
 
@@ -90,6 +92,7 @@ fn load_app_state() -> AppState {
                 reconciliation_notice: None,
                 attachment_notice: None,
                 transition_notice: None,
+                agent_plan_notice: None,
                 autopilot_preview: None,
             }
         }
@@ -104,6 +107,7 @@ fn load_app_state() -> AppState {
             reconciliation_notice: None,
             attachment_notice: None,
             transition_notice: None,
+            agent_plan_notice: None,
             autopilot_preview: None,
         },
     }
@@ -135,6 +139,56 @@ fn transition_work_item(
         .map_err(|error| error.to_string())
 }
 
+fn update_agent_plan(request: &AgentPlanUpdateRequest) -> Result<AgentPlanUpdateReceipt, String> {
+    SqliteBoardStore::open(board_database_path())
+        .and_then(|mut store| store.update_agent_plan(request))
+        .map_err(|error| error.to_string())
+}
+
+fn handle_attachment(mut state: Signal<AppState>, request: &AttachmentRequest) {
+    match attach(request) {
+        Ok(receipt) => {
+            let mut reloaded = load_app_state();
+            reloaded.attachment_notice = Some(attachment_message(&receipt));
+            state.set(reloaded);
+        }
+        Err(error) => state.write().attachment_notice = Some(error),
+    }
+}
+
+fn handle_reconciliation(mut state: Signal<AppState>, request: &ReconciliationRequest) {
+    match reconcile(request) {
+        Ok(receipt) => {
+            let mut reloaded = load_app_state();
+            reloaded.reconciliation_notice = Some(reconciliation_message(&receipt));
+            state.set(reloaded);
+        }
+        Err(error) => state.write().reconciliation_notice = Some(error),
+    }
+}
+
+fn handle_transition(mut state: Signal<AppState>, request: &WorkItemTransitionRequest) {
+    match transition_work_item(request) {
+        Ok(receipt) => {
+            let mut reloaded = load_app_state();
+            reloaded.transition_notice = Some(transition_message(&receipt));
+            state.set(reloaded);
+        }
+        Err(error) => state.write().transition_notice = Some(error),
+    }
+}
+
+fn handle_agent_plan(mut state: Signal<AppState>, request: &AgentPlanUpdateRequest) {
+    match update_agent_plan(request) {
+        Ok(receipt) => {
+            let mut reloaded = load_app_state();
+            reloaded.agent_plan_notice = Some(agent_plan_message(&receipt));
+            state.set(reloaded);
+        }
+        Err(error) => state.write().agent_plan_notice = Some(error),
+    }
+}
+
 #[allow(non_snake_case)]
 fn App() -> Element {
     let mut state = use_signal(load_app_state);
@@ -154,31 +208,10 @@ fn App() -> Element {
             PREVIEW_GLOBAL_CONCURRENCY_CAP,
         ));
     };
-    let on_attach = move |request: AttachmentRequest| match attach(&request) {
-        Ok(receipt) => {
-            let mut reloaded = load_app_state();
-            reloaded.attachment_notice = Some(attachment_message(&receipt));
-            state.set(reloaded);
-        }
-        Err(error) => state.write().attachment_notice = Some(error),
-    };
-    let on_reconcile = move |request: ReconciliationRequest| match reconcile(&request) {
-        Ok(receipt) => {
-            let mut reloaded = load_app_state();
-            reloaded.reconciliation_notice = Some(reconciliation_message(&receipt));
-            state.set(reloaded);
-        }
-        Err(error) => state.write().reconciliation_notice = Some(error),
-    };
-    let on_transition =
-        move |request: WorkItemTransitionRequest| match transition_work_item(&request) {
-            Ok(receipt) => {
-                let mut reloaded = load_app_state();
-                reloaded.transition_notice = Some(transition_message(&receipt));
-                state.set(reloaded);
-            }
-            Err(error) => state.write().transition_notice = Some(error),
-        };
+    let on_attach = move |request| handle_attachment(state, &request);
+    let on_reconcile = move |request| handle_reconciliation(state, &request);
+    let on_transition = move |request| handle_transition(state, &request);
+    let on_agent_plan = move |request| handle_agent_plan(state, &request);
 
     rsx! {
         document::Title { "Gareji Board" }
@@ -221,6 +254,10 @@ fn App() -> Element {
                 aside { class: "action-notice", "{notice}" }
             }
 
+            if let Some(notice) = &snapshot.agent_plan_notice {
+                aside { class: "action-notice", "{notice}" }
+            }
+
             ActivityInbox {
                 activity: snapshot.activity.clone(),
                 work_items: snapshot.work_items.clone(),
@@ -235,7 +272,9 @@ fn App() -> Element {
 
             WorkItemControl {
                 work_items: snapshot.work_items.clone(),
+                agent_profiles: snapshot.agent_profiles.clone(),
                 on_transition,
+                on_agent_plan,
             }
 
             ProjectGrid { portfolio: snapshot.portfolio.clone() }
@@ -628,9 +667,12 @@ fn reconciliation_class(decision: ReconciliationDecision) -> &'static str {
 #[component]
 fn WorkItemControl(
     work_items: Vec<WorkItemSummary>,
+    agent_profiles: Vec<AgentProfileSummary>,
     on_transition: EventHandler<WorkItemTransitionRequest>,
+    on_agent_plan: EventHandler<AgentPlanUpdateRequest>,
 ) -> Element {
     let work_item_count = work_items.len();
+    let capability_catalog = agent_capability_catalog(&agent_profiles, &work_items);
     let lanes = group_work_items_by_state(work_items);
     rsx! {
         section { class: "section-heading",
@@ -653,7 +695,10 @@ fn WorkItemControl(
                         key: "{state.as_str()}",
                         state,
                         work_items: lane_items,
+                        agent_profiles: agent_profiles.clone(),
+                        capability_catalog: capability_catalog.clone(),
                         on_transition,
+                        on_agent_plan,
                     }
                 }
             }
@@ -665,7 +710,10 @@ fn WorkItemControl(
 fn KanbanLane(
     state: WorkItemState,
     work_items: Vec<WorkItemSummary>,
+    agent_profiles: Vec<AgentProfileSummary>,
+    capability_catalog: Vec<String>,
     on_transition: EventHandler<WorkItemTransitionRequest>,
+    on_agent_plan: EventHandler<AgentPlanUpdateRequest>,
 ) -> Element {
     let item_count = work_items.len();
     let state_label = work_item_state_label(state);
@@ -690,7 +738,10 @@ fn KanbanLane(
                         WorkItemCard {
                             key: "{item.id}",
                             item,
+                            agent_profiles: agent_profiles.clone(),
+                            capability_catalog: capability_catalog.clone(),
                             on_transition,
+                            on_agent_plan,
                         }
                     }
                 }
@@ -702,7 +753,10 @@ fn KanbanLane(
 #[component]
 fn WorkItemCard(
     item: WorkItemSummary,
+    agent_profiles: Vec<AgentProfileSummary>,
+    capability_catalog: Vec<String>,
     on_transition: EventHandler<WorkItemTransitionRequest>,
+    on_agent_plan: EventHandler<AgentPlanUpdateRequest>,
 ) -> Element {
     let observed_state = item.state;
     let mut target = use_signal(move || observed_state);
@@ -713,6 +767,35 @@ fn WorkItemCard(
         work_item_id: item.id.clone(),
         expected_state: observed_state,
         target_state,
+    };
+    let expected_agent_plan = item.agent_plan();
+    let initial_agent_profile_id = expected_agent_plan.agent_profile_id.clone();
+    let initial_capabilities = expected_agent_plan.required_capabilities.clone();
+    let mut target_agent_profile_id = use_signal(move || initial_agent_profile_id);
+    let mut target_capabilities = use_signal(move || initial_capabilities);
+    let selected_agent_profile_id = target_agent_profile_id.read().clone();
+    let selected_capabilities = target_capabilities.read().clone();
+    let target_agent_plan = AgentPlan {
+        agent_profile_id: selected_agent_profile_id.clone(),
+        required_capabilities: selected_capabilities.clone(),
+    };
+    let can_update_agent_plan = target_agent_plan != expected_agent_plan;
+    let agent_plan_request = AgentPlanUpdateRequest {
+        project_id: item.project_id.clone(),
+        work_item_id: item.id.clone(),
+        expected: expected_agent_plan,
+        target: target_agent_plan,
+    };
+    let on_capability_change = move |(capability, selected): (String, bool)| {
+        let mut capabilities = target_capabilities.write();
+        if selected {
+            if !capabilities.contains(&capability) {
+                capabilities.push(capability);
+                capabilities.sort();
+            }
+        } else {
+            capabilities.retain(|candidate| candidate != &capability);
+        }
     };
     let agent_label = item
         .agent_profile_id
@@ -752,6 +835,59 @@ fn WorkItemCard(
                 span { "{capability_label}" }
             }
             p { class: "work-item-eligibility", "{work_item_eligibility_label(item.state)}" }
+            details { class: "agent-plan-editor",
+                summary { "Edit Agent plan" }
+                div { class: "agent-plan-fields",
+                    label {
+                        span { "Assigned Agent" }
+                        select {
+                            aria_label: "Assigned Agent for {item.id}",
+                            value: selected_agent_profile_id.as_deref().unwrap_or(""),
+                            onchange: move |event| {
+                                let value = event.value();
+                                target_agent_profile_id.set(if value.is_empty() {
+                                    None
+                                } else {
+                                    Some(value)
+                                });
+                            },
+                            option {
+                                value: "",
+                                selected: selected_agent_profile_id.is_none(),
+                                "Unassigned"
+                            }
+                            for profile in agent_profiles {
+                                option {
+                                    value: "{profile.id}",
+                                    selected: selected_agent_profile_id.as_deref() == Some(profile.id.as_str()),
+                                    "{profile.role} · {profile.id}"
+                                }
+                            }
+                        }
+                    }
+                    fieldset { class: "capability-picker",
+                        legend { "Required capabilities" }
+                        if capability_catalog.is_empty() {
+                            p { "No Agent capabilities available" }
+                        } else {
+                            for capability in capability_catalog {
+                                CapabilityToggle {
+                                    key: "{capability}",
+                                    capability: capability.clone(),
+                                    selected: selected_capabilities.contains(&capability),
+                                    on_change: on_capability_change,
+                                }
+                            }
+                        }
+                    }
+                    button {
+                        class: "agent-plan-action",
+                        disabled: !can_update_agent_plan,
+                        onclick: move |_| on_agent_plan.call(agent_plan_request.clone()),
+                        "Save Agent plan"
+                    }
+                }
+            }
             div { class: "work-item-actions",
                 label {
                     span { "Move to" }
@@ -779,6 +915,27 @@ fn WorkItemCard(
                     "Update state"
                 }
             }
+        }
+    }
+}
+
+#[component]
+fn CapabilityToggle(
+    capability: String,
+    selected: bool,
+    on_change: EventHandler<(String, bool)>,
+) -> Element {
+    let capability_for_change = capability.clone();
+    rsx! {
+        label { class: "capability-choice",
+            input {
+                r#type: "checkbox",
+                checked: selected,
+                onchange: move |event| {
+                    on_change.call((capability_for_change.clone(), event.checked()));
+                }
+            }
+            span { "{capability}" }
         }
     }
 }
@@ -956,6 +1113,24 @@ fn approval_requirement_class(requirement: ApprovalRequirement) -> &'static str 
     }
 }
 
+fn agent_capability_catalog(
+    agent_profiles: &[AgentProfileSummary],
+    work_items: &[WorkItemSummary],
+) -> Vec<String> {
+    let mut capabilities = agent_profiles
+        .iter()
+        .flat_map(|profile| profile.capabilities.iter().cloned())
+        .chain(
+            work_items
+                .iter()
+                .flat_map(|item| item.required_capabilities.iter().cloned()),
+        )
+        .collect::<Vec<_>>();
+    capabilities.sort();
+    capabilities.dedup();
+    capabilities
+}
+
 fn group_work_items_by_state(
     work_items: Vec<WorkItemSummary>,
 ) -> Vec<(WorkItemState, Vec<WorkItemSummary>)> {
@@ -1082,6 +1257,27 @@ fn transition_message(receipt: &WorkItemTransitionReceipt) -> String {
     }
 }
 
+fn agent_plan_message(receipt: &AgentPlanUpdateReceipt) -> String {
+    if !receipt.changed {
+        return format!("{} already had this Agent plan.", receipt.work_item_id);
+    }
+    let agent = receipt
+        .resulting
+        .agent_profile_id
+        .as_deref()
+        .unwrap_or("Unassigned");
+    let capability_count = receipt.resulting.required_capabilities.len();
+    let capability_noun = if capability_count == 1 {
+        "capability"
+    } else {
+        "capabilities"
+    };
+    format!(
+        "{} Agent plan saved: {} with {} required {}.",
+        receipt.work_item_id, agent, capability_count, capability_noun
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1115,6 +1311,44 @@ mod tests {
 
         assert_eq!(suggest_work_item_id("gareji-core", &candidates), "CORE-5");
         assert_eq!(suggest_work_item_id("new-project", &[]), "PROJECT-1");
+    }
+
+    #[test]
+    fn agent_capability_catalog_is_stable_and_unique() {
+        let profiles = vec![
+            AgentProfileSummary {
+                id: "reviewer".to_owned(),
+                role: "Reviewer".to_owned(),
+                capabilities: vec!["testing".to_owned(), "review".to_owned()],
+            },
+            AgentProfileSummary {
+                id: "implementer".to_owned(),
+                role: "Implementer".to_owned(),
+                capabilities: vec!["implementation".to_owned(), "testing".to_owned()],
+            },
+        ];
+
+        let work_items = vec![WorkItemSummary {
+            id: "BOARD-9".to_owned(),
+            project_id: "gareji-board".to_owned(),
+            title: "Retire a legacy requirement".to_owned(),
+            state: WorkItemState::Todo,
+            priority: 1,
+            approval_requirement: ApprovalRequirement::None,
+            dependency_ids: Vec::new(),
+            agent_profile_id: None,
+            required_capabilities: vec!["legacy-capability".to_owned()],
+        }];
+
+        assert_eq!(
+            agent_capability_catalog(&profiles, &work_items),
+            vec![
+                "implementation".to_owned(),
+                "legacy-capability".to_owned(),
+                "review".to_owned(),
+                "testing".to_owned(),
+            ]
+        );
     }
 
     #[test]

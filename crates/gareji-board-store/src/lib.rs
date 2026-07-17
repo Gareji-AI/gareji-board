@@ -7,11 +7,12 @@ use std::time::Duration;
 
 use directories::ProjectDirs;
 use gareji_board_domain::{
-    ActiveWorkAssessment, ActivityTimeline, AgentProfileSummary, ApprovalRequirement,
-    AttachmentReceipt, AttachmentRequest, AttachmentTarget, CheckpointAttachment,
-    CheckpointReconciliation, PortfolioSnapshot, ProjectHealth, ProjectSummary,
-    ReconciliationDecision, ReconciliationReceipt, ReconciliationRequest, WorkItemCounts,
-    WorkItemState, WorkItemSummary, WorkItemTransitionReceipt, WorkItemTransitionRequest,
+    ActiveWorkAssessment, ActivityTimeline, AgentPlan, AgentPlanUpdateReceipt,
+    AgentPlanUpdateRequest, AgentProfileSummary, ApprovalRequirement, AttachmentReceipt,
+    AttachmentRequest, AttachmentTarget, CheckpointAttachment, CheckpointReconciliation,
+    PortfolioSnapshot, ProjectHealth, ProjectSummary, ReconciliationDecision,
+    ReconciliationReceipt, ReconciliationRequest, WorkItemCounts, WorkItemState, WorkItemSummary,
+    WorkItemTransitionReceipt, WorkItemTransitionRequest,
 };
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params, params_from_iter};
 use thiserror::Error;
@@ -336,6 +337,116 @@ impl SqliteBoardStore {
         hydrate_work_item_dependencies(&self.connection, &positions, &mut work_items)?;
         hydrate_work_item_requirements(&self.connection, &positions, &mut work_items)?;
         Ok(work_items)
+    }
+
+    /// Atomically replace one Work item's Board-owned Agent plan.
+    ///
+    /// # Errors
+    ///
+    /// Returns a bounded validation, lookup, concurrent-change, storage, or
+    /// corrupt-state error. Saving the stored plan is a successful no-op.
+    pub fn update_agent_plan(
+        &mut self,
+        request: &AgentPlanUpdateRequest,
+    ) -> Result<AgentPlanUpdateReceipt, StoreError> {
+        validate_id(&request.project_id)?;
+        validate_id(&request.work_item_id)?;
+        let expected = canonical_agent_plan(&request.expected)?;
+        let target = canonical_agent_plan(&request.target)?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(StoreError::Sqlite)?;
+        let stored = transaction
+            .query_row(
+                "SELECT w.id, w.agent_profile_id
+                 FROM board_projects p
+                 LEFT JOIN board_work_items w
+                   ON w.project_id = p.id AND w.id = ?2
+                 WHERE p.id = ?1",
+                params![request.project_id, request.work_item_id],
+                |row| {
+                    Ok((
+                        row.get::<_, Option<String>>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(StoreError::Sqlite)?
+            .ok_or(StoreError::ProjectNotFound)?;
+        let (Some(_), stored_agent_profile_id) = stored else {
+            return Err(StoreError::WorkItemNotFound);
+        };
+        let previous = AgentPlan {
+            agent_profile_id: stored_agent_profile_id,
+            required_capabilities: load_required_capabilities(&transaction, &request.work_item_id)?,
+        };
+        if previous != expected {
+            return Err(StoreError::ConcurrentChange);
+        }
+        if let Some(agent_profile_id) = &target.agent_profile_id {
+            let profile_exists = transaction
+                .query_row(
+                    "SELECT EXISTS(
+                       SELECT 1 FROM board_agent_profiles WHERE id = ?1
+                     )",
+                    [agent_profile_id],
+                    |row| row.get::<_, bool>(0),
+                )
+                .map_err(StoreError::Sqlite)?;
+            if !profile_exists {
+                return Err(StoreError::AgentProfileNotFound);
+            }
+        }
+        if previous == target {
+            return Ok(AgentPlanUpdateReceipt {
+                work_item_id: request.work_item_id.clone(),
+                previous: previous.clone(),
+                resulting: previous,
+                changed: false,
+            });
+        }
+
+        let changed = transaction
+            .execute(
+                "UPDATE board_work_items
+                 SET agent_profile_id = ?1
+                 WHERE project_id = ?2 AND id = ?3",
+                params![
+                    target.agent_profile_id,
+                    request.project_id,
+                    request.work_item_id
+                ],
+            )
+            .map_err(StoreError::Sqlite)?;
+        if changed != 1 {
+            return Err(StoreError::ConcurrentChange);
+        }
+        transaction
+            .execute(
+                "DELETE FROM board_work_item_required_capabilities
+                 WHERE work_item_id = ?1",
+                [&request.work_item_id],
+            )
+            .map_err(StoreError::Sqlite)?;
+        for capability in &target.required_capabilities {
+            transaction
+                .execute(
+                    "INSERT INTO board_work_item_required_capabilities
+                       (work_item_id, capability)
+                     VALUES (?1, ?2)",
+                    params![request.work_item_id, capability],
+                )
+                .map_err(StoreError::Sqlite)?;
+        }
+        transaction.commit().map_err(StoreError::Sqlite)?;
+        Ok(AgentPlanUpdateReceipt {
+            work_item_id: request.work_item_id.clone(),
+            previous,
+            resulting: target,
+            changed: true,
+        })
     }
 
     /// Apply one explicit human Work item transition against observed state.
@@ -1076,6 +1187,26 @@ fn hydrate_work_item_requirements(
     Ok(())
 }
 
+fn load_required_capabilities(
+    connection: &Connection,
+    work_item_id: &str,
+) -> Result<Vec<String>, StoreError> {
+    let mut statement = connection
+        .prepare(
+            "SELECT capability
+             FROM board_work_item_required_capabilities
+             WHERE work_item_id = ?1
+             ORDER BY capability",
+        )
+        .map_err(StoreError::Sqlite)?;
+    let capabilities = statement
+        .query_map([work_item_id], |row| row.get::<_, String>(0))
+        .map_err(StoreError::Sqlite)?;
+    capabilities
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(StoreError::Sqlite)
+}
+
 struct StoredAttachment {
     checkpoint_id: String,
     project_id: String,
@@ -1241,6 +1372,30 @@ fn validate_title(value: &str) -> Result<(), StoreError> {
     Ok(())
 }
 
+fn canonical_agent_plan(plan: &AgentPlan) -> Result<AgentPlan, StoreError> {
+    if let Some(agent_profile_id) = &plan.agent_profile_id {
+        validate_id(agent_profile_id)?;
+    }
+    let mut required_capabilities = plan.required_capabilities.clone();
+    for capability in &required_capabilities {
+        validate_capability(capability)?;
+    }
+    required_capabilities.sort();
+    required_capabilities.dedup();
+    Ok(AgentPlan {
+        agent_profile_id: plan.agent_profile_id.clone(),
+        required_capabilities,
+    })
+}
+
+fn validate_capability(value: &str) -> Result<(), StoreError> {
+    let length = value.chars().count();
+    if length == 0 || length > 64 || value.trim() != value {
+        return Err(StoreError::InvalidRequest);
+    }
+    Ok(())
+}
+
 #[derive(Debug, Error)]
 pub enum StoreError {
     #[error("request did not satisfy the Board contract")]
@@ -1249,6 +1404,8 @@ pub enum StoreError {
     ProjectNotFound,
     #[error("Work item was not found in the requested project")]
     WorkItemNotFound,
+    #[error("Agent profile was not found")]
+    AgentProfileNotFound,
     #[error("a Work item with this ID already exists")]
     WorkItemAlreadyExists,
     #[error("this Checkpoint already has a Work item link")]
@@ -1314,6 +1471,102 @@ mod tests {
             candidate.required_capabilities,
             vec!["implementation".to_owned()]
         );
+    }
+
+    #[test]
+    fn agent_plan_update_is_atomic_idempotent_and_rejects_stale_observations() {
+        let mut store = SqliteBoardStore::open_in_memory().unwrap();
+        store.seed_sample_if_empty().unwrap();
+        let previous = AgentPlan {
+            agent_profile_id: Some("implementer".to_owned()),
+            required_capabilities: vec!["implementation".to_owned()],
+        };
+        let target = AgentPlan {
+            agent_profile_id: Some("release-checker".to_owned()),
+            required_capabilities: vec![
+                "testing".to_owned(),
+                "release".to_owned(),
+                "testing".to_owned(),
+            ],
+        };
+        let request = AgentPlanUpdateRequest {
+            project_id: "gareji-core".to_owned(),
+            work_item_id: "CORE-2".to_owned(),
+            expected: previous.clone(),
+            target,
+        };
+
+        let receipt = store.update_agent_plan(&request).unwrap();
+        assert!(receipt.changed);
+        assert_eq!(receipt.previous, previous);
+        assert_eq!(
+            receipt.resulting,
+            AgentPlan {
+                agent_profile_id: Some("release-checker".to_owned()),
+                required_capabilities: vec!["release".to_owned(), "testing".to_owned()],
+            }
+        );
+        assert!(matches!(
+            store.update_agent_plan(&AgentPlanUpdateRequest {
+                target: AgentPlan {
+                    agent_profile_id: Some("reviewer".to_owned()),
+                    required_capabilities: vec!["review".to_owned()],
+                },
+                ..request.clone()
+            }),
+            Err(StoreError::ConcurrentChange)
+        ));
+
+        let stored = store
+            .load_work_items()
+            .unwrap()
+            .into_iter()
+            .find(|work_item| work_item.id == "CORE-2")
+            .unwrap();
+        assert_eq!(stored.agent_plan(), receipt.resulting);
+        let no_change = store
+            .update_agent_plan(&AgentPlanUpdateRequest {
+                expected: stored.agent_plan(),
+                target: stored.agent_plan(),
+                ..request
+            })
+            .unwrap();
+        assert!(!no_change.changed);
+    }
+
+    #[test]
+    fn agent_plan_update_validates_profile_and_project_relationship() {
+        let mut store = SqliteBoardStore::open_in_memory().unwrap();
+        store.seed_sample_if_empty().unwrap();
+        let current = store
+            .load_work_items()
+            .unwrap()
+            .into_iter()
+            .find(|work_item| work_item.id == "CORE-2")
+            .unwrap()
+            .agent_plan();
+
+        assert!(matches!(
+            store.update_agent_plan(&AgentPlanUpdateRequest {
+                project_id: "gareji-core".to_owned(),
+                work_item_id: "CORE-2".to_owned(),
+                expected: current.clone(),
+                target: AgentPlan {
+                    agent_profile_id: Some("missing".to_owned()),
+                    required_capabilities: Vec::new(),
+                },
+            }),
+            Err(StoreError::AgentProfileNotFound)
+        ));
+        assert!(matches!(
+            store.update_agent_plan(&AgentPlanUpdateRequest {
+                project_id: "gareji-board".to_owned(),
+                work_item_id: "CORE-2".to_owned(),
+                expected: current.clone(),
+                target: current,
+            }),
+            Err(StoreError::WorkItemNotFound)
+        ));
     }
 
     #[test]
