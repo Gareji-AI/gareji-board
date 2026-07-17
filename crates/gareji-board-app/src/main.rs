@@ -4,11 +4,12 @@ use std::path::PathBuf;
 use dioxus::prelude::*;
 use gareji_board_core::CoreProgressReader;
 use gareji_board_domain::{
-    ActivityTimeline, AttachmentReceipt, AttachmentRequest, AttachmentTarget, AutopilotStopReason,
-    CandidateSkipReason, CheckpointDeliveryStatus, CheckpointOutcome, CheckpointReconciliation,
-    NoCandidateReason, PortfolioSnapshot, ProgressActivity, ProjectHealth, ReconciliationDecision,
-    ReconciliationReceipt, ReconciliationRequest, SafeAutopilotOutcome, SafeAutopilotPreview,
-    WorkItemState, WorkItemSummary, WorkItemTransitionReceipt, WorkItemTransitionRequest,
+    ActivityTimeline, ApprovalRequirement, AttachmentReceipt, AttachmentRequest, AttachmentTarget,
+    AutopilotStopReason, CandidateSkipReason, CheckpointDeliveryStatus, CheckpointOutcome,
+    CheckpointReconciliation, NoCandidateReason, PortfolioSnapshot, ProgressActivity,
+    ProjectHealth, ReconciliationDecision, ReconciliationReceipt, ReconciliationRequest,
+    SafeAutopilotOutcome, SafeAutopilotPreview, WorkItemState, WorkItemSummary,
+    WorkItemTransitionReceipt, WorkItemTransitionRequest,
 };
 use gareji_board_store::{SqliteBoardStore, default_board_database_path};
 
@@ -719,6 +720,18 @@ fn WorkItemCard(
                 }
             }
             p { class: "work-item-project", "{item.project_id} · Priority {item.priority}" }
+            div { class: "work-item-gates",
+                span { class: approval_requirement_class(item.approval_requirement),
+                    "Approval · {approval_requirement_label(item.approval_requirement)}"
+                }
+                span {
+                    if item.dependency_ids.is_empty() {
+                        "No dependencies"
+                    } else {
+                        "{item.dependency_ids.len()} dependency(s)"
+                    }
+                }
+            }
             p { class: "work-item-eligibility", "{work_item_eligibility_label(item.state)}" }
             div { class: "work-item-actions",
                 label {
@@ -785,6 +798,7 @@ fn AutopilotPreviewPanel(preview: SafeAutopilotPreview) -> Element {
                                 "{candidate.project_name} is at {candidate.active_runs}/{candidate.execution_cap} active capacity. This item is priority {candidate.work_item.priority}."
                             }
                             div { class: "preview-facts",
+                                span { "Stored gates passed" }
                                 span { "Lowest project load first" }
                                 span { "Then priority" }
                                 span { "Then stable IDs" }
@@ -809,7 +823,7 @@ fn AutopilotPreviewPanel(preview: SafeAutopilotPreview) -> Element {
             div { class: "preview-foot",
                 div {
                     strong { "{fast_exit}" }
-                    p { "Execution still requires dependency, approval, capability, workspace, cooldown, and evidence preflights." }
+                    p { "Stored dependencies and Approval requirements are checked here. Execution still requires trusted capability, workspace, cooldown, and evidence preflights." }
                 }
                 span { "Global capacity {PREVIEW_GLOBAL_CONCURRENCY_CAP}" }
             }
@@ -821,7 +835,7 @@ fn AutopilotPreviewPanel(preview: SafeAutopilotPreview) -> Element {
                         for skip in &preview.skipped {
                             li { key: "{skip.work_item.project_id}-{skip.work_item.id}",
                                 strong { "{skip.work_item.id}" }
-                                span { "{candidate_skip_message(skip.reason)}" }
+                                span { "{candidate_skip_message(&skip.reason)}" }
                             }
                         }
                     }
@@ -831,7 +845,7 @@ fn AutopilotPreviewPanel(preview: SafeAutopilotPreview) -> Element {
     }
 }
 
-fn candidate_skip_message(reason: CandidateSkipReason) -> String {
+fn candidate_skip_message(reason: &CandidateSkipReason) -> String {
     match reason {
         CandidateSkipReason::StateNotTodo(state) => {
             format!("State is {state}; preview considers todo only.")
@@ -844,6 +858,13 @@ fn candidate_skip_message(reason: CandidateSkipReason) -> String {
             active_runs,
             concurrency_cap,
         } => format!("Global capacity is full at {active_runs}/{concurrency_cap}."),
+        CandidateSkipReason::ApprovalRequired => {
+            "Explicit human approval is required before execution.".to_owned()
+        }
+        CandidateSkipReason::DependencyNotDone {
+            dependency_id,
+            state,
+        } => format!("Dependency {dependency_id} is still {state}."),
         CandidateSkipReason::LowerRanked => {
             "Runnable, but ranked behind the selected candidate.".to_owned()
         }
@@ -857,7 +878,8 @@ fn no_candidate_message(reason: NoCandidateReason) -> String {
             concurrency_cap,
         } => format!("Global capacity is already {active_runs}/{concurrency_cap}."),
         NoCandidateReason::NoRunnableCandidate => {
-            "No todo Work item belongs to a project with available capacity.".to_owned()
+            "No todo Work item passed the stored dependency, Approval, and capacity gates."
+                .to_owned()
         }
     }
 }
@@ -873,9 +895,30 @@ fn autopilot_stop_message(reason: &AutopilotStopReason) -> String {
         AutopilotStopReason::DuplicateProject { project_id } => {
             format!("Project {project_id} appears more than once.")
         }
+        AutopilotStopReason::DuplicateWorkItem { work_item_id } => {
+            format!("Work item {work_item_id} appears more than once.")
+        }
         AutopilotStopReason::ProjectNotFound { project_id } => {
             format!("A Work item refers to missing project {project_id}.")
         }
+        AutopilotStopReason::DependencyNotFound {
+            work_item_id,
+            dependency_id,
+        } => format!("Work item {work_item_id} refers to missing dependency {dependency_id}."),
+    }
+}
+
+fn approval_requirement_label(requirement: ApprovalRequirement) -> &'static str {
+    match requirement {
+        ApprovalRequirement::None => "None",
+        ApprovalRequirement::Explicit => "Explicit",
+    }
+}
+
+fn approval_requirement_class(requirement: ApprovalRequirement) -> &'static str {
+    match requirement {
+        ApprovalRequirement::None => "work-item-gate gate-ready",
+        ApprovalRequirement::Explicit => "work-item-gate gate-approval",
     }
 }
 
@@ -1018,6 +1061,8 @@ mod tests {
                 title: "First".to_owned(),
                 priority: 1,
                 state: WorkItemState::Done,
+                approval_requirement: ApprovalRequirement::None,
+                dependency_ids: Vec::new(),
             },
             WorkItemSummary {
                 id: "CORE-4".to_owned(),
@@ -1025,6 +1070,8 @@ mod tests {
                 title: "Fourth".to_owned(),
                 priority: 2,
                 state: WorkItemState::Todo,
+                approval_requirement: ApprovalRequirement::None,
+                dependency_ids: Vec::new(),
             },
         ];
 
@@ -1041,6 +1088,8 @@ mod tests {
                 title: "Second".to_owned(),
                 priority: 2,
                 state: WorkItemState::Blocked,
+                approval_requirement: ApprovalRequirement::Explicit,
+                dependency_ids: vec!["BOARD-1".to_owned()],
             },
             WorkItemSummary {
                 id: "BOARD-1".to_owned(),
@@ -1048,6 +1097,8 @@ mod tests {
                 title: "First".to_owned(),
                 priority: 1,
                 state: WorkItemState::Todo,
+                approval_requirement: ApprovalRequirement::None,
+                dependency_ids: Vec::new(),
             },
         ]);
 

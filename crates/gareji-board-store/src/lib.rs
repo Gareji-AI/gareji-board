@@ -7,11 +7,11 @@ use std::time::Duration;
 
 use directories::ProjectDirs;
 use gareji_board_domain::{
-    ActiveWorkAssessment, ActivityTimeline, AttachmentReceipt, AttachmentRequest, AttachmentTarget,
-    CheckpointAttachment, CheckpointReconciliation, PortfolioSnapshot, ProjectHealth,
-    ProjectSummary, ReconciliationDecision, ReconciliationReceipt, ReconciliationRequest,
-    WorkItemCounts, WorkItemState, WorkItemSummary, WorkItemTransitionReceipt,
-    WorkItemTransitionRequest,
+    ActiveWorkAssessment, ActivityTimeline, ApprovalRequirement, AttachmentReceipt,
+    AttachmentRequest, AttachmentTarget, CheckpointAttachment, CheckpointReconciliation,
+    PortfolioSnapshot, ProjectHealth, ProjectSummary, ReconciliationDecision,
+    ReconciliationReceipt, ReconciliationRequest, WorkItemCounts, WorkItemState, WorkItemSummary,
+    WorkItemTransitionReceipt, WorkItemTransitionRequest,
 };
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params, params_from_iter};
 use thiserror::Error;
@@ -77,6 +77,9 @@ impl SqliteBoardStore {
                    project_id TEXT NOT NULL,
                    title TEXT NOT NULL,
                    priority INTEGER NOT NULL DEFAULT 100 CHECK (priority > 0),
+                   approval_requirement TEXT NOT NULL DEFAULT 'none' CHECK (
+                     approval_requirement IN ('none', 'explicit')
+                   ),
                    state TEXT NOT NULL CHECK (
                      state IN ('backlog', 'todo', 'in_progress', 'in_review', 'blocked', 'done', 'cancelled')
                    ),
@@ -84,6 +87,16 @@ impl SqliteBoardStore {
                  );
                  CREATE INDEX IF NOT EXISTS board_work_items_by_project_state
                    ON board_work_items(project_id, state);
+                 CREATE TABLE IF NOT EXISTS board_work_item_dependencies (
+                   work_item_id TEXT NOT NULL,
+                   dependency_work_item_id TEXT NOT NULL,
+                   PRIMARY KEY (work_item_id, dependency_work_item_id),
+                   CHECK (work_item_id <> dependency_work_item_id),
+                   FOREIGN KEY (work_item_id) REFERENCES board_work_items(id) ON DELETE RESTRICT,
+                   FOREIGN KEY (dependency_work_item_id) REFERENCES board_work_items(id) ON DELETE RESTRICT
+                 );
+                 CREATE INDEX IF NOT EXISTS board_dependencies_by_prerequisite
+                   ON board_work_item_dependencies(dependency_work_item_id, work_item_id);
                  CREATE TABLE IF NOT EXISTS board_checkpoint_reconciliations (
                    checkpoint_id TEXT PRIMARY KEY,
                    project_id TEXT NOT NULL,
@@ -116,28 +129,9 @@ impl SqliteBoardStore {
                     ON board_checkpoint_attachments(project_id, work_item_id, attached_at);",
             )
             .map_err(StoreError::Sqlite)?;
-        let has_priority: bool = connection
-            .query_row(
-                "SELECT EXISTS(
-                   SELECT 1
-                   FROM pragma_table_info('board_work_items')
-                   WHERE name = 'priority'
-                 )",
-                [],
-                |row| row.get(0),
-            )
-            .map_err(StoreError::Sqlite)?;
-        if !has_priority {
-            connection
-                .execute(
-                    "ALTER TABLE board_work_items
-                     ADD COLUMN priority INTEGER NOT NULL DEFAULT 100 CHECK (priority > 0)",
-                    [],
-                )
-                .map_err(StoreError::Sqlite)?;
-        }
+        migrate_work_item_columns(&connection)?;
         connection
-            .execute_batch("PRAGMA user_version = 4;")
+            .execute_batch("PRAGMA user_version = 5;")
             .map_err(StoreError::Sqlite)?;
         Ok(Self { connection })
     }
@@ -160,78 +154,8 @@ impl SqliteBoardStore {
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(StoreError::Sqlite)?;
-        let projects = [
-            ("gareji-board", "Gareji Board", "healthy", 2_i64),
-            ("gareji-core", "Gareji Core", "healthy", 1_i64),
-            (
-                "zettelkasten-plugin",
-                "Zettelkasten Plugin",
-                "blocked",
-                1_i64,
-            ),
-        ];
-        for project in projects {
-            transaction
-                .execute(
-                    "INSERT INTO board_projects (id, name, health, execution_cap)
-                     VALUES (?1, ?2, ?3, ?4)",
-                    params![project.0, project.1, project.2, project.3],
-                )
-                .map_err(StoreError::Sqlite)?;
-        }
-
-        let work_items = [
-            (
-                "BOARD-1",
-                "gareji-board",
-                "Build portfolio screen",
-                1_i64,
-                WorkItemState::InProgress,
-            ),
-            (
-                "BOARD-2",
-                "gareji-board",
-                "Connect existing project",
-                2_i64,
-                WorkItemState::Todo,
-            ),
-            (
-                "CORE-1",
-                "gareji-core",
-                "Stabilize Runner seam",
-                1_i64,
-                WorkItemState::InReview,
-            ),
-            (
-                "CORE-2",
-                "gareji-core",
-                "Add active-work registry",
-                1_i64,
-                WorkItemState::Todo,
-            ),
-            (
-                "ZETTEL-1",
-                "zettelkasten-plugin",
-                "Resolve write destination",
-                1_i64,
-                WorkItemState::Blocked,
-            ),
-        ];
-        for work_item in work_items {
-            transaction
-                .execute(
-                    "INSERT INTO board_work_items (id, project_id, title, priority, state)
-                     VALUES (?1, ?2, ?3, ?4, ?5)",
-                    params![
-                        work_item.0,
-                        work_item.1,
-                        work_item.2,
-                        work_item.3,
-                        work_item.4.as_str()
-                    ],
-                )
-                .map_err(StoreError::Sqlite)?;
-        }
+        insert_sample_projects(&transaction)?;
+        insert_sample_work_items(&transaction)?;
         transaction.commit().map_err(StoreError::Sqlite)?;
         Ok(true)
     }
@@ -295,7 +219,7 @@ impl SqliteBoardStore {
         let mut statement = self
             .connection
             .prepare(
-                "SELECT id, project_id, title, priority, state
+                "SELECT id, project_id, title, priority, state, approval_requirement
                  FROM board_work_items
                  ORDER BY project_id, priority, id",
             )
@@ -308,19 +232,51 @@ impl SqliteBoardStore {
                     row.get::<_, String>(2)?,
                     row.get::<_, i64>(3)?,
                     row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
                 ))
             })
             .map_err(StoreError::Sqlite)?;
         let mut work_items = Vec::new();
         for row in rows {
-            let (id, project_id, title, priority, state) = row.map_err(StoreError::Sqlite)?;
+            let (id, project_id, title, priority, state, approval_requirement) =
+                row.map_err(StoreError::Sqlite)?;
             work_items.push(WorkItemSummary {
                 id,
                 project_id,
                 title,
                 priority: positive_u32(priority)?,
                 state: parse_work_item_state(&state)?,
+                approval_requirement: parse_approval_requirement(&approval_requirement)?,
+                dependency_ids: Vec::new(),
             });
+        }
+        drop(statement);
+
+        let positions: HashMap<String, usize> = work_items
+            .iter()
+            .enumerate()
+            .map(|(index, work_item)| (work_item.id.clone(), index))
+            .collect();
+        let mut dependency_statement = self
+            .connection
+            .prepare(
+                "SELECT work_item_id, dependency_work_item_id
+                 FROM board_work_item_dependencies
+                 ORDER BY work_item_id, dependency_work_item_id",
+            )
+            .map_err(StoreError::Sqlite)?;
+        let dependencies = dependency_statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(StoreError::Sqlite)?;
+        for dependency in dependencies {
+            let (work_item_id, dependency_id) = dependency.map_err(StoreError::Sqlite)?;
+            let index = positions
+                .get(&work_item_id)
+                .copied()
+                .ok_or(StoreError::CorruptState("dependency owner is missing"))?;
+            work_items[index].dependency_ids.push(dependency_id);
         }
         Ok(work_items)
     }
@@ -787,6 +743,146 @@ impl SqliteBoardStore {
     }
 }
 
+fn migrate_work_item_columns(connection: &Connection) -> Result<(), StoreError> {
+    if !work_item_column_exists(connection, "priority")? {
+        connection
+            .execute(
+                "ALTER TABLE board_work_items
+                 ADD COLUMN priority INTEGER NOT NULL DEFAULT 100 CHECK (priority > 0)",
+                [],
+            )
+            .map_err(StoreError::Sqlite)?;
+    }
+    if !work_item_column_exists(connection, "approval_requirement")? {
+        connection
+            .execute(
+                "ALTER TABLE board_work_items
+                 ADD COLUMN approval_requirement TEXT NOT NULL DEFAULT 'none' CHECK (
+                   approval_requirement IN ('none', 'explicit')
+                 )",
+                [],
+            )
+            .map_err(StoreError::Sqlite)?;
+    }
+    Ok(())
+}
+
+fn insert_sample_projects(transaction: &rusqlite::Transaction<'_>) -> Result<(), StoreError> {
+    let projects = [
+        ("gareji-board", "Gareji Board", "healthy", 2_i64),
+        ("gareji-core", "Gareji Core", "healthy", 1_i64),
+        (
+            "zettelkasten-plugin",
+            "Zettelkasten Plugin",
+            "blocked",
+            1_i64,
+        ),
+    ];
+    for project in projects {
+        transaction
+            .execute(
+                "INSERT INTO board_projects (id, name, health, execution_cap)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![project.0, project.1, project.2, project.3],
+            )
+            .map_err(StoreError::Sqlite)?;
+    }
+    Ok(())
+}
+
+fn insert_sample_work_items(transaction: &rusqlite::Transaction<'_>) -> Result<(), StoreError> {
+    let work_items = [
+        (
+            "BOARD-1",
+            "gareji-board",
+            "Build portfolio screen",
+            1_i64,
+            ApprovalRequirement::None,
+            WorkItemState::InProgress,
+        ),
+        (
+            "BOARD-2",
+            "gareji-board",
+            "Connect existing project",
+            2_i64,
+            ApprovalRequirement::Explicit,
+            WorkItemState::Todo,
+        ),
+        (
+            "BOARD-3",
+            "gareji-board",
+            "Prepare cross-project handoff",
+            3_i64,
+            ApprovalRequirement::None,
+            WorkItemState::Todo,
+        ),
+        (
+            "CORE-1",
+            "gareji-core",
+            "Stabilize Runner seam",
+            1_i64,
+            ApprovalRequirement::None,
+            WorkItemState::InReview,
+        ),
+        (
+            "CORE-2",
+            "gareji-core",
+            "Add active-work registry",
+            1_i64,
+            ApprovalRequirement::None,
+            WorkItemState::Todo,
+        ),
+        (
+            "ZETTEL-1",
+            "zettelkasten-plugin",
+            "Resolve write destination",
+            1_i64,
+            ApprovalRequirement::None,
+            WorkItemState::Blocked,
+        ),
+    ];
+    for work_item in work_items {
+        transaction
+            .execute(
+                "INSERT INTO board_work_items
+                   (id, project_id, title, priority, approval_requirement, state)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    work_item.0,
+                    work_item.1,
+                    work_item.2,
+                    work_item.3,
+                    work_item.4.as_str(),
+                    work_item.5.as_str()
+                ],
+            )
+            .map_err(StoreError::Sqlite)?;
+    }
+    transaction
+        .execute(
+            "INSERT INTO board_work_item_dependencies
+               (work_item_id, dependency_work_item_id)
+             VALUES ('BOARD-3', 'CORE-1')",
+            [],
+        )
+        .map_err(StoreError::Sqlite)?;
+    Ok(())
+}
+
+fn work_item_column_exists(connection: &Connection, column: &str) -> Result<bool, StoreError> {
+    connection
+        .query_row(
+            "SELECT EXISTS(
+               SELECT 1
+               FROM pragma_table_info('board_work_items')
+               WHERE name = ?1
+             )",
+            [column],
+            |row| row.get(0),
+        )
+        .map_err(StoreError::Sqlite)
+}
+
 struct StoredAttachment {
     checkpoint_id: String,
     project_id: String,
@@ -883,6 +979,11 @@ fn load_reconciliation(
 
 fn parse_work_item_state(value: &str) -> Result<WorkItemState, StoreError> {
     WorkItemState::try_from(value).map_err(|_| StoreError::CorruptState("unknown Work item state"))
+}
+
+fn parse_approval_requirement(value: &str) -> Result<ApprovalRequirement, StoreError> {
+    ApprovalRequirement::try_from(value)
+        .map_err(|_| StoreError::CorruptState("unknown Approval requirement"))
 }
 
 struct RawProjectSummary {
@@ -992,6 +1093,18 @@ mod tests {
         assert_eq!(snapshot.projects.len(), 3);
         assert_eq!(snapshot.active_runs(), 1);
         assert_eq!(snapshot.blocked_items(), 1);
+
+        let work_items = store.load_work_items().unwrap();
+        let approval = work_items
+            .iter()
+            .find(|work_item| work_item.id == "BOARD-2")
+            .unwrap();
+        assert_eq!(approval.approval_requirement, ApprovalRequirement::Explicit);
+        let dependent = work_items
+            .iter()
+            .find(|work_item| work_item.id == "BOARD-3")
+            .unwrap();
+        assert_eq!(dependent.dependency_ids, vec!["CORE-1".to_owned()]);
     }
 
     #[test]
@@ -1247,6 +1360,9 @@ mod tests {
         assert_eq!(work_item.project_id, "gareji-core");
         assert_eq!(work_item.title, "Capture Activity Inbox follow-up");
         assert_eq!(work_item.state, WorkItemState::Todo);
+        assert_eq!(work_item.priority, 100);
+        assert_eq!(work_item.approval_requirement, ApprovalRequirement::None);
+        assert!(work_item.dependency_ids.is_empty());
 
         let duplicate = store.attach_checkpoint(&request).unwrap();
         assert!(duplicate.duplicate);
@@ -1429,7 +1545,7 @@ mod tests {
             .connection
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 4);
+        assert_eq!(version, 5);
         let priority: i64 = store
             .connection
             .query_row(
@@ -1439,6 +1555,27 @@ mod tests {
             )
             .unwrap();
         assert_eq!(priority, 100);
+        let approval_requirement: String = store
+            .connection
+            .query_row(
+                "SELECT approval_requirement FROM board_work_items WHERE id = 'CORE-1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(approval_requirement, "none");
+        let dependency_table_exists: bool = store
+            .connection
+            .query_row(
+                "SELECT EXISTS(
+                   SELECT 1 FROM sqlite_master
+                   WHERE type = 'table' AND name = 'board_work_item_dependencies'
+                 )",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(dependency_table_exists);
     }
 
     fn activity(

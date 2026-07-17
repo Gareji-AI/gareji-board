@@ -69,6 +69,12 @@ impl WorkItemState {
             Self::InProgress | Self::InReview | Self::Blocked | Self::Done
         )
     }
+
+    /// Decide whether this terminal state resolves a Work item dependency.
+    #[must_use]
+    pub const fn resolves_dependency(self) -> bool {
+        matches!(self, Self::Done | Self::Cancelled)
+    }
 }
 
 impl TryFrom<&str> for WorkItemState {
@@ -89,6 +95,47 @@ impl TryFrom<&str> for WorkItemState {
 }
 
 impl fmt::Display for WorkItemState {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+/// Board-owned requirement for a human decision before execution.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalRequirement {
+    None,
+    Explicit,
+}
+
+impl ApprovalRequirement {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Explicit => "explicit",
+        }
+    }
+
+    #[must_use]
+    pub const fn requires_approval(self) -> bool {
+        matches!(self, Self::Explicit)
+    }
+}
+
+impl TryFrom<&str> for ApprovalRequirement {
+    type Error = UnknownApprovalRequirement;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "none" => Ok(Self::None),
+            "explicit" => Ok(Self::Explicit),
+            _ => Err(UnknownApprovalRequirement),
+        }
+    }
+}
+
+impl fmt::Display for ApprovalRequirement {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(self.as_str())
     }
@@ -159,6 +206,18 @@ impl fmt::Display for UnknownWorkItemState {
 }
 
 impl std::error::Error for UnknownWorkItemState {}
+
+/// Stored Approval requirement violated the domain vocabulary.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct UnknownApprovalRequirement;
+
+impl fmt::Display for UnknownApprovalRequirement {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("unknown Approval requirement")
+    }
+}
+
+impl std::error::Error for UnknownApprovalRequirement {}
 
 /// Board-owned result of deciding whether work may reference one Work item.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -464,6 +523,8 @@ pub struct WorkItemSummary {
     /// Lower values are considered first by deterministic selection policies.
     pub priority: u32,
     pub state: WorkItemState,
+    pub approval_requirement: ApprovalRequirement,
+    pub dependency_ids: Vec<String>,
 }
 
 /// Explicit human intent to change one Board-owned Work item state.
@@ -556,7 +617,7 @@ pub struct AutopilotCandidate {
 }
 
 /// Expected reason why one Work item did not become the preview candidate.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CandidateSkipReason {
     StateNotTodo(WorkItemState),
     ProjectAtCapacity {
@@ -566,6 +627,11 @@ pub enum CandidateSkipReason {
     GlobalCapacityReached {
         active_runs: u32,
         concurrency_cap: u32,
+    },
+    ApprovalRequired,
+    DependencyNotDone {
+        dependency_id: String,
+        state: WorkItemState,
     },
     LowerRanked,
 }
@@ -591,9 +657,22 @@ pub enum NoCandidateReason {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum AutopilotStopReason {
     InvalidGlobalConcurrencyCap,
-    InvalidProjectCapacity { project_id: String },
-    DuplicateProject { project_id: String },
-    ProjectNotFound { project_id: String },
+    InvalidProjectCapacity {
+        project_id: String,
+    },
+    DuplicateProject {
+        project_id: String,
+    },
+    DuplicateWorkItem {
+        work_item_id: String,
+    },
+    ProjectNotFound {
+        project_id: String,
+    },
+    DependencyNotFound {
+        work_item_id: String,
+        dependency_id: String,
+    },
 }
 
 /// Bounded outcome of one read-only Safe Autopilot selection pass.
@@ -611,6 +690,9 @@ pub struct SafeAutopilotPreview {
     pub skipped: Vec<CandidateSkip>,
 }
 
+type ProjectIndex<'a> = HashMap<&'a str, &'a ProjectSummary>;
+type WorkItemIndex<'a> = HashMap<&'a str, &'a WorkItemSummary>;
+
 impl SafeAutopilotPreview {
     /// Evaluate current Board-owned facts without mutating or reserving them.
     #[must_use]
@@ -623,27 +705,10 @@ impl SafeAutopilotPreview {
             return Self::stopped(AutopilotStopReason::InvalidGlobalConcurrencyCap);
         }
 
-        let mut projects = HashMap::with_capacity(portfolio.projects.len());
-        for project in &portfolio.projects {
-            if project.execution_cap == 0 {
-                return Self::stopped(AutopilotStopReason::InvalidProjectCapacity {
-                    project_id: project.id.clone(),
-                });
-            }
-            if projects.insert(project.id.as_str(), project).is_some() {
-                return Self::stopped(AutopilotStopReason::DuplicateProject {
-                    project_id: project.id.clone(),
-                });
-            }
-        }
-
-        for work_item in work_items {
-            if !projects.contains_key(work_item.project_id.as_str()) {
-                return Self::stopped(AutopilotStopReason::ProjectNotFound {
-                    project_id: work_item.project_id.clone(),
-                });
-            }
-        }
+        let (projects, work_items_by_id) = match Self::index_facts(portfolio, work_items) {
+            Ok(indexes) => indexes,
+            Err(reason) => return Self::stopped(reason),
+        };
 
         let active_runs = portfolio.active_runs();
         let global_capacity_reached = active_runs >= global_concurrency_cap;
@@ -652,21 +717,13 @@ impl SafeAutopilotPreview {
 
         for work_item in work_items {
             let project = projects[work_item.project_id.as_str()];
-            let reason = if work_item.state != WorkItemState::Todo {
-                Some(CandidateSkipReason::StateNotTodo(work_item.state))
-            } else if global_capacity_reached {
-                Some(CandidateSkipReason::GlobalCapacityReached {
-                    active_runs,
-                    concurrency_cap: global_concurrency_cap,
-                })
-            } else if project.work_items.in_progress >= project.execution_cap {
-                Some(CandidateSkipReason::ProjectAtCapacity {
-                    active_runs: project.work_items.in_progress,
-                    execution_cap: project.execution_cap,
-                })
-            } else {
-                None
-            };
+            let reason = Self::candidate_skip_reason(
+                work_item,
+                project,
+                &work_items_by_id,
+                active_runs,
+                global_concurrency_cap,
+            );
 
             if let Some(reason) = reason {
                 skipped.push(CandidateSkip {
@@ -744,6 +801,86 @@ impl SafeAutopilotPreview {
             outcome: SafeAutopilotOutcome::Stop(reason),
             skipped: Vec::new(),
         }
+    }
+
+    fn index_facts<'a>(
+        portfolio: &'a PortfolioSnapshot,
+        work_items: &'a [WorkItemSummary],
+    ) -> Result<(ProjectIndex<'a>, WorkItemIndex<'a>), AutopilotStopReason> {
+        let mut projects = HashMap::with_capacity(portfolio.projects.len());
+        for project in &portfolio.projects {
+            if project.execution_cap == 0 {
+                return Err(AutopilotStopReason::InvalidProjectCapacity {
+                    project_id: project.id.clone(),
+                });
+            }
+            if projects.insert(project.id.as_str(), project).is_some() {
+                return Err(AutopilotStopReason::DuplicateProject {
+                    project_id: project.id.clone(),
+                });
+            }
+        }
+
+        let mut items = HashMap::with_capacity(work_items.len());
+        for work_item in work_items {
+            if items.insert(work_item.id.as_str(), work_item).is_some() {
+                return Err(AutopilotStopReason::DuplicateWorkItem {
+                    work_item_id: work_item.id.clone(),
+                });
+            }
+            if !projects.contains_key(work_item.project_id.as_str()) {
+                return Err(AutopilotStopReason::ProjectNotFound {
+                    project_id: work_item.project_id.clone(),
+                });
+            }
+        }
+        for work_item in work_items {
+            for dependency_id in &work_item.dependency_ids {
+                if !items.contains_key(dependency_id.as_str()) {
+                    return Err(AutopilotStopReason::DependencyNotFound {
+                        work_item_id: work_item.id.clone(),
+                        dependency_id: dependency_id.clone(),
+                    });
+                }
+            }
+        }
+        Ok((projects, items))
+    }
+
+    fn candidate_skip_reason(
+        work_item: &WorkItemSummary,
+        project: &ProjectSummary,
+        work_items: &WorkItemIndex<'_>,
+        active_runs: u32,
+        concurrency_cap: u32,
+    ) -> Option<CandidateSkipReason> {
+        if work_item.state != WorkItemState::Todo {
+            return Some(CandidateSkipReason::StateNotTodo(work_item.state));
+        }
+        if active_runs >= concurrency_cap {
+            return Some(CandidateSkipReason::GlobalCapacityReached {
+                active_runs,
+                concurrency_cap,
+            });
+        }
+        if project.work_items.in_progress >= project.execution_cap {
+            return Some(CandidateSkipReason::ProjectAtCapacity {
+                active_runs: project.work_items.in_progress,
+                execution_cap: project.execution_cap,
+            });
+        }
+        if work_item.approval_requirement.requires_approval() {
+            return Some(CandidateSkipReason::ApprovalRequired);
+        }
+        work_item.dependency_ids.iter().find_map(|dependency_id| {
+            let dependency = work_items[dependency_id.as_str()];
+            (!dependency.state.resolves_dependency()).then(|| {
+                CandidateSkipReason::DependencyNotDone {
+                    dependency_id: dependency_id.clone(),
+                    state: dependency.state,
+                }
+            })
+        })
     }
 }
 
@@ -957,6 +1094,59 @@ mod tests {
     }
 
     #[test]
+    fn candidate_preview_skips_explicit_approval_and_unresolved_dependencies() {
+        let portfolio = PortfolioSnapshot {
+            projects: vec![project("board", 0, 3)],
+        };
+        let mut approval = work_item("BOARD-1", "board", 1, WorkItemState::Todo);
+        approval.approval_requirement = ApprovalRequirement::Explicit;
+        let prerequisite = work_item("BOARD-2", "board", 1, WorkItemState::InReview);
+        let mut dependent = work_item("BOARD-3", "board", 2, WorkItemState::Todo);
+        dependent.dependency_ids.push("BOARD-2".to_owned());
+        let candidate = work_item("BOARD-4", "board", 3, WorkItemState::Todo);
+
+        let preview = SafeAutopilotPreview::evaluate(
+            &portfolio,
+            &[approval, prerequisite, dependent, candidate],
+            3,
+        );
+
+        let SafeAutopilotOutcome::Candidate(candidate) = &preview.outcome else {
+            panic!("expected a candidate")
+        };
+        assert_eq!(candidate.work_item.id, "BOARD-4");
+        assert!(preview.skipped.iter().any(|skip| {
+            skip.work_item.id == "BOARD-1" && skip.reason == CandidateSkipReason::ApprovalRequired
+        }));
+        assert!(preview.skipped.iter().any(|skip| {
+            skip.work_item.id == "BOARD-3"
+                && skip.reason
+                    == CandidateSkipReason::DependencyNotDone {
+                        dependency_id: "BOARD-2".to_owned(),
+                        state: WorkItemState::InReview,
+                    }
+        }));
+    }
+
+    #[test]
+    fn terminal_dependencies_allow_candidate_selection() {
+        let portfolio = PortfolioSnapshot {
+            projects: vec![project("board", 0, 2)],
+        };
+        for terminal_state in [WorkItemState::Done, WorkItemState::Cancelled] {
+            let prerequisite = work_item("BOARD-1", "board", 1, terminal_state);
+            let mut dependent = work_item("BOARD-2", "board", 1, WorkItemState::Todo);
+            dependent.dependency_ids.push("BOARD-1".to_owned());
+
+            let preview = SafeAutopilotPreview::evaluate(&portfolio, &[prerequisite, dependent], 2);
+            let SafeAutopilotOutcome::Candidate(candidate) = preview.outcome else {
+                panic!("expected a candidate")
+            };
+            assert_eq!(candidate.work_item.id, "BOARD-2");
+        }
+    }
+
+    #[test]
     fn candidate_preview_fails_closed_for_invalid_relationships() {
         let portfolio = PortfolioSnapshot {
             projects: vec![project("core", 0, 1)],
@@ -976,6 +1166,26 @@ mod tests {
         assert_eq!(
             SafeAutopilotPreview::evaluate(&portfolio, &[], 0).outcome,
             SafeAutopilotOutcome::Stop(AutopilotStopReason::InvalidGlobalConcurrencyCap)
+        );
+
+        let mut missing_dependency = work_item("CORE-1", "core", 1, WorkItemState::Todo);
+        missing_dependency
+            .dependency_ids
+            .push("CORE-MISSING".to_owned());
+        assert_eq!(
+            SafeAutopilotPreview::evaluate(&portfolio, &[missing_dependency], 2).outcome,
+            SafeAutopilotOutcome::Stop(AutopilotStopReason::DependencyNotFound {
+                work_item_id: "CORE-1".to_owned(),
+                dependency_id: "CORE-MISSING".to_owned(),
+            })
+        );
+
+        let duplicate = work_item("CORE-1", "core", 2, WorkItemState::Todo);
+        assert_eq!(
+            SafeAutopilotPreview::evaluate(&portfolio, &[duplicate.clone(), duplicate], 2).outcome,
+            SafeAutopilotOutcome::Stop(AutopilotStopReason::DuplicateWorkItem {
+                work_item_id: "CORE-1".to_owned(),
+            })
         );
     }
 
@@ -1004,6 +1214,8 @@ mod tests {
             title: id.to_owned(),
             priority,
             state,
+            approval_requirement: ApprovalRequirement::None,
+            dependency_ids: Vec::new(),
         }
     }
 }
