@@ -45,6 +45,8 @@ record(checkpoint) -> receipt
 sync_pending() -> delivery summary
 ```
 
+Core also exposes a bounded newest-first history read through its local Bridge. Board uses that Interface to build the Activity timeline and never queries the Recorder's SQLite tables directly. The history result includes current per-destination delivery state and bounded failure summaries so reconciliation remains understandable while the ledger stays Core-owned.
+
 Validation, workspace resolution, redaction, idempotency, durable outbox writes, Activity Inbox routing, Board projection, knowledge projection, retries, and conflict detection remain inside the Module. Runner, MCP, CLI, and Hook adapters do not reproduce these rules.
 
 The only MCP tool that creates progress is `record_progress`. MCP does not expose a capture-time `complete_work_item` shortcut. A checkpoint carries `recommended_state`; Gareji Board applies or requests approval for the actual transition.
