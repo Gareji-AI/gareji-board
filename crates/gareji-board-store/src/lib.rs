@@ -1129,33 +1129,38 @@ fn insert_sample_agent_profiles(transaction: &rusqlite::Transaction<'_>) -> Resu
         (
             "implementer",
             "Implementer",
+            "agents/implementer/AGENT.md",
             ["implementation", "testing"],
             ["implement-bounded-work-item", "write-project-handoff"],
         ),
         (
             "researcher",
             "Researcher",
+            "agents/researcher/AGENT.md",
             ["evidence", "research"],
             ["summarize-project-context", "write-project-handoff"],
         ),
         (
             "reviewer",
             "Reviewer",
+            "agents/reviewer/AGENT.md",
             ["review", "testing"],
             ["review-work-item", "write-project-handoff"],
         ),
         (
             "release-checker",
             "Release checker",
+            "agents/release-checker/AGENT.md",
             ["release", "testing"],
             ["review-work-item", "write-project-handoff"],
         ),
     ];
-    for (id, role, capabilities, skill_refs) in profiles {
+    for (id, role, instruction_ref, capabilities, skill_refs) in profiles {
         transaction
             .execute(
-                "INSERT INTO board_agent_profiles (id, role) VALUES (?1, ?2)",
-                params![id, role],
+                "INSERT INTO board_agent_profiles (id, role, instruction_ref)
+                 VALUES (?1, ?2, ?3)",
+                params![id, role, instruction_ref],
             )
             .map_err(StoreError::Sqlite)?;
         for capability in capabilities {
@@ -1776,6 +1781,17 @@ mod tests {
         assert_eq!(
             profiles[0].capabilities,
             vec!["implementation".to_owned(), "testing".to_owned()]
+        );
+        assert_eq!(
+            profiles[0].instruction_ref.as_deref(),
+            Some("agents/implementer/AGENT.md")
+        );
+        assert_eq!(
+            profiles[0].skill_refs,
+            vec![
+                "implement-bounded-work-item".to_owned(),
+                "write-project-handoff".to_owned()
+            ]
         );
         let approval = work_items
             .iter()

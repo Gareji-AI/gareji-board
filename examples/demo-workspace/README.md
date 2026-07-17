@@ -12,6 +12,4 @@ The directories under `4_Project` are imported as Board projects. Their Markdown
 
 Future GBrain, LLMWiki, and runtime plugins will each receive their own product project instead of being grouped into one `Gareji Plugins` project.
 
-## Bundled Skills
-
-The `.agents/skills` directory contains four small, inspectable sample Skills for context summary, bounded implementation, review, and handoff writing. They are part of the disposable demo and are not installed into the user's personal Codex configuration.
+Agent instructions and Skills live in the separate `examples/demo-execution-workspace` fixture. This Knowledge workspace contains context only and does not act as executable agent configuration.

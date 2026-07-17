@@ -119,7 +119,7 @@ button, input, select { font: inherit; }
 .agent-catalog { display: grid; gap: 14px; padding: 16px; border: 1px solid #303a35; border-radius: 14px; background: rgba(20, 27, 23, .72); }
 .new-agent-profile { border: 1px dashed #3d564b; border-radius: 10px; background: rgba(23, 38, 31, .55); }
 .new-agent-profile > summary { padding: 13px 15px; color: #8fe6b4; cursor: pointer; font-size: 12px; font-weight: 750; }
-.agent-profile-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }
+.agent-profile-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 12px; }
 .agent-profile-card { min-width: 0; padding: 15px; border: 1px solid #303b36; border-radius: 11px; background: #171d1a; }
 .agent-profile-card-head { display: flex; align-items: start; justify-content: space-between; gap: 12px; }
 .agent-profile-card-head h4 { margin: 0 0 5px; color: #f1ede5; font-size: 14px; }
@@ -131,6 +131,24 @@ button, input, select { font: inherit; }
 .agent-profile-behavior dt { color: #74827a; font-size: 9px; text-transform: uppercase; letter-spacing: .08em; }
 .agent-profile-behavior dd { min-width: 0; margin: 0; color: #aeb9b3; font-size: 10px; line-height: 1.45; overflow-wrap: anywhere; }
 .agent-profile-behavior code { color: #93b9d6; font-size: 9px; }
+.behavior-inspection-source { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 3px 10px; align-items: center; padding: 11px 13px; border: 1px solid #2f4439; border-radius: 10px; background: #15221b; }
+.behavior-inspection-source span { color: #78877f; font-size: 9px; text-transform: uppercase; letter-spacing: .08em; }
+.behavior-inspection-source strong { color: #b9e8cc; font-size: 11px; overflow-wrap: anywhere; }
+.behavior-inspection-source small { grid-column: 2; color: #74827a; font-size: 9px; }
+.behavior-inspection { margin: 0 0 13px; padding: 10px; border: 1px solid #303b36; border-radius: 9px; background: #141a17; }
+.behavior-inspection-head { display: flex; justify-content: space-between; gap: 8px; align-items: center; }
+.behavior-inspection-head strong { color: #aeb9b3; font-size: 10px; }
+.behavior-inspection-head span { padding: 3px 6px; border-radius: 999px; font-size: 8px; font-weight: 800; text-transform: uppercase; letter-spacing: .05em; }
+.behavior-inspection p { margin: 8px 0 0; color: #7f8c85; font-size: 9px; line-height: 1.45; }
+.behavior-inspection ul { display: grid; gap: 6px; margin: 9px 0 0; padding: 0; list-style: none; }
+.behavior-inspection li { display: grid; grid-template-columns: 54px minmax(0, 1fr) auto; gap: 7px; align-items: center; }
+.behavior-inspection li > span { color: #718078; font-size: 8px; text-transform: uppercase; }
+.behavior-inspection li code { min-width: 0; color: #91aec4; font-size: 8px; overflow-wrap: anywhere; }
+.behavior-inspection li em { font-size: 8px; font-style: normal; font-weight: 750; }
+.inspection-ready .behavior-inspection-head span, .reference-present { color: #98e3b9; background: #183523; }
+.inspection-missing .behavior-inspection-head span, .reference-missing { color: #f0ca7d; background: #3a2d15; }
+.inspection-unsafe .behavior-inspection-head span, .reference-unsafe { color: #ff9d92; background: #44201c; }
+.inspection-unavailable .behavior-inspection-head span, .reference-unavailable, .inspection-empty .behavior-inspection-head span { color: #a8b1ac; background: #2a302d; }
 .agent-profile-card details { border-top: 1px solid #29332e; }
 .agent-profile-card summary { padding-top: 11px; color: #a6d4ff; cursor: pointer; font-size: 10px; font-weight: 700; }
 .agent-profile-form { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; padding: 4px 15px 15px; border-top: 1px solid #304039; }
@@ -238,6 +256,7 @@ button, input, select { font: inherit; }
   .reconciliation-actions { align-items: flex-start; flex-direction: column; }
   .attachment-actions { align-items: stretch; flex-direction: column; }
   .creation-actions { grid-template-columns: 1fr; align-items: stretch; }
+  .agent-profile-grid { grid-template-columns: 1fr; }
   .agent-profile-form { grid-template-columns: 1fr; }
   .kanban-board { grid-auto-columns: minmax(258px, calc(100vw - 64px)); }
 }

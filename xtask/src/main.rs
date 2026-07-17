@@ -151,6 +151,72 @@ fn validate_demo_refs(root: &Path) -> Result<()> {
             &label(item, "run")?,
         )?;
     }
+    validate_demo_agent_files(root, &demo)?;
+    Ok(())
+}
+
+fn validate_demo_agent_files(root: &Path, demo: &Value) -> Result<()> {
+    let fixtures = array(demo, "execution_workspaces")?
+        .iter()
+        .map(|workspace| {
+            let fixture = string_field(workspace, "fixture")?;
+            let label = label(workspace, "execution workspace")?;
+            require_relative_path(fixture, &label)?;
+            let path = root.join(fixture);
+            if !path.is_dir() {
+                bail!("{label} fixture is not a directory: {fixture}");
+            }
+            Ok(path)
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    for skill in array(demo, "skill_catalog")? {
+        let source = string_field(skill, "source")?;
+        let skill_label = label(skill, "skill")?;
+        require_relative_path(source, &skill_label)?;
+        require_contained_file(root, &root.join(source).join("SKILL.md"), &skill_label)?;
+    }
+    for agent in array(demo, "agents")? {
+        let instruction = string_field(agent, "instructions")?;
+        let agent_label = label(agent, "agent")?;
+        require_relative_path(instruction, &agent_label)?;
+        let resolves = fixtures.iter().any(|fixture| {
+            require_contained_file(fixture, &fixture.join(instruction), &agent_label).is_ok()
+        });
+        if !resolves {
+            bail!(
+                "{agent_label} instruction does not resolve in a demo Execution workspace: {instruction}"
+            );
+        }
+    }
+    Ok(())
+}
+
+fn require_relative_path(value: &str, label: &str) -> Result<()> {
+    let path = Path::new(value);
+    if value.is_empty()
+        || value.contains(['\\', ':'])
+        || value.chars().any(char::is_control)
+        || !path
+            .components()
+            .all(|component| matches!(component, std::path::Component::Normal(_)))
+    {
+        bail!("{label} has an unsafe relative path: {value}");
+    }
+    Ok(())
+}
+
+fn require_contained_file(root: &Path, candidate: &Path, label: &str) -> Result<()> {
+    let canonical_root = fs::canonicalize(root)
+        .with_context(|| format!("could not inspect {label} root: {}", root.display()))?;
+    let canonical_candidate = fs::canonicalize(candidate)
+        .with_context(|| format!("missing {label} file: {}", candidate.display()))?;
+    if !canonical_candidate.starts_with(&canonical_root) || !canonical_candidate.is_file() {
+        bail!(
+            "{label} file escapes its root or is not regular: {}",
+            candidate.display()
+        );
+    }
     Ok(())
 }
 

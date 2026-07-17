@@ -31,10 +31,10 @@
     }
   },
   "skill_catalog": [
-    {"id": "summarize-project-context", "source": "examples/demo-workspace/.agents/skills/summarize-project-context", "trust": "bundled"},
-    {"id": "implement-bounded-work-item", "source": "examples/demo-workspace/.agents/skills/implement-bounded-work-item", "trust": "bundled"},
-    {"id": "review-work-item", "source": "examples/demo-workspace/.agents/skills/review-work-item", "trust": "bundled"},
-    {"id": "write-project-handoff", "source": "examples/demo-workspace/.agents/skills/write-project-handoff", "trust": "bundled"}
+    {"id": "summarize-project-context", "source": "examples/demo-execution-workspace/.agents/skills/summarize-project-context", "trust": "bundled"},
+    {"id": "implement-bounded-work-item", "source": "examples/demo-execution-workspace/.agents/skills/implement-bounded-work-item", "trust": "bundled"},
+    {"id": "review-work-item", "source": "examples/demo-execution-workspace/.agents/skills/review-work-item", "trust": "bundled"},
+    {"id": "write-project-handoff", "source": "examples/demo-execution-workspace/.agents/skills/write-project-handoff", "trust": "bundled"}
   ],
   "knowledge_adapter_catalog": [
     {"id": "local_json", "role": "bundled_demo", "availability": "available"},
@@ -110,6 +110,7 @@
       "id": "board-local",
       "project_id": "board",
       "location": "demo-session://projects/gareji-board",
+      "fixture": "examples/demo-execution-workspace",
       "connection_status": "materialized_on_launch",
       "write_policy": "workspace_write"
     },
@@ -117,6 +118,7 @@
       "id": "core-local",
       "project_id": "core",
       "location": "demo-session://projects/gareji-core",
+      "fixture": "examples/demo-execution-workspace",
       "connection_status": "materialized_on_launch",
       "write_policy": "workspace_write"
     },
@@ -124,15 +126,16 @@
       "id": "zettelkasten-plugin-local",
       "project_id": "zettelkasten-plugin",
       "location": "demo-session://projects/zettelkasten-plugin",
+      "fixture": "examples/demo-execution-workspace",
       "connection_status": "materialized_on_launch",
       "write_policy": "workspace_write"
     }
   ],
   "agents": [
-    {"id": "researcher", "role": "Researcher", "capabilities": ["analyze", "summarize"], "skills": ["summarize-project-context", "write-project-handoff"], "model": "inherit", "plugin": "demo-research"},
-    {"id": "implementer", "role": "Implementer", "capabilities": ["implement", "test"], "skills": ["implement-bounded-work-item", "write-project-handoff"], "model": "inherit", "plugin": "demo-implement"},
-    {"id": "reviewer", "role": "Reviewer", "capabilities": ["review", "verify"], "skills": ["review-work-item", "write-project-handoff"], "model": "inherit", "plugin": "demo-review"},
-    {"id": "writer", "role": "Docs writer", "capabilities": ["write", "summarize"], "skills": ["summarize-project-context", "write-project-handoff"], "model": "inherit", "plugin": "demo-write"}
+    {"id": "researcher", "role": "Researcher", "instructions": "agents/researcher/AGENT.md", "capabilities": ["evidence", "research"], "skills": ["summarize-project-context", "write-project-handoff"], "model": "inherit", "plugin": "demo-research"},
+    {"id": "implementer", "role": "Implementer", "instructions": "agents/implementer/AGENT.md", "capabilities": ["implementation", "testing"], "skills": ["implement-bounded-work-item", "write-project-handoff"], "model": "inherit", "plugin": "demo-implement"},
+    {"id": "reviewer", "role": "Reviewer", "instructions": "agents/reviewer/AGENT.md", "capabilities": ["review", "testing"], "skills": ["review-work-item", "write-project-handoff"], "model": "inherit", "plugin": "demo-review"},
+    {"id": "release-checker", "role": "Release checker", "instructions": "agents/release-checker/AGENT.md", "capabilities": ["release", "testing"], "skills": ["review-work-item", "write-project-handoff"], "model": "inherit", "plugin": "demo-release-check"}
   ],
   "projects": [
     {"id": "core", "name": "Gareji Core", "health": "healthy", "execution_cap": 1, "execution_workspace_ids": ["core-local"], "context_source_ids": ["core-project-json", "core-project-note"]},
@@ -146,7 +149,7 @@
       "title": "Turn the project notes into a demo brief",
       "state": "todo",
       "priority": 1,
-      "agent_id": "writer",
+      "agent_id": "researcher",
       "context_source_ids": ["board-project-json", "board-project-note"],
       "context": "Use the bundled Markdown notes; create a short, reviewable summary.",
       "approval_requirement": "none"

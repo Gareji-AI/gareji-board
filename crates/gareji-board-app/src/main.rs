@@ -14,6 +14,13 @@ use gareji_board_domain::{
 };
 use gareji_board_store::{SqliteBoardStore, default_board_database_path};
 
+mod agent_behavior;
+
+use agent_behavior::{
+    AgentBehaviorInspection, AgentBehaviorInspector, BehaviorInspectionStatus, ReferenceInspection,
+    ReferenceStatus,
+};
+
 const APP_CSS: &str = include_str!("style.css");
 const PREVIEW_GLOBAL_CONCURRENCY_CAP: u32 = 2;
 const WORK_ITEM_STATES: [WorkItemState; 7] = [
@@ -747,6 +754,8 @@ fn AgentProfileCatalog(
     let profile_count = agent_profiles.len();
     let capability_catalog = agent_capability_catalog(&agent_profiles, &work_items);
     let capability_catalog_label = capability_catalog.join(", ");
+    let behavior_inspector = AgentBehaviorInspector::from_environment();
+    let behavior_source_label = behavior_inspector.label();
     rsx! {
         section { class: "section-heading",
             div {
@@ -756,6 +765,11 @@ fn AgentProfileCatalog(
             span { "{profile_count} configured" }
         }
         section { class: "agent-catalog", aria_label: "Agent profile catalog",
+            div { class: "behavior-inspection-source",
+                span { "Reference workspace" }
+                strong { "{behavior_source_label}" }
+                small { "Presence check only; trust and Runner preflight remain separate." }
+            }
             NewAgentProfileForm {
                 existing_profiles: agent_profiles.clone(),
                 profile_id: new_profile_id,
@@ -769,6 +783,7 @@ fn AgentProfileCatalog(
                 for profile in agent_profiles {
                     AgentProfileCard {
                         key: "{profile.id}",
+                        inspection: behavior_inspector.inspect(&profile),
                         profile,
                         on_save,
                     }
@@ -877,6 +892,7 @@ fn NewAgentProfileForm(
 #[component]
 fn AgentProfileCard(
     profile: AgentProfileSummary,
+    inspection: AgentBehaviorInspection,
     on_save: EventHandler<AgentProfileSaveRequest>,
 ) -> Element {
     let initial_role = profile.role.clone();
@@ -941,6 +957,7 @@ fn AgentProfileCard(
                     dd { "{skill_label}" }
                 }
             }
+            AgentBehaviorInspectionView { inspection }
             details {
                 summary { "Edit profile" }
                 div { class: "agent-profile-form compact",
@@ -975,6 +992,95 @@ fn AgentProfileCard(
                 }
             }
         }
+    }
+}
+
+#[component]
+fn AgentBehaviorInspectionView(inspection: AgentBehaviorInspection) -> Element {
+    let status_label = behavior_inspection_status_label(inspection.status);
+    let status_class = behavior_inspection_status_class(inspection.status);
+    let class = format!("behavior-inspection {status_class}");
+    let unavailable = inspection.status == BehaviorInspectionStatus::WorkspaceUnavailable;
+    let no_references = inspection.status == BehaviorInspectionStatus::NoReferences;
+    rsx! {
+        div { class: "{class}",
+            div { class: "behavior-inspection-head",
+                strong { "Reference check" }
+                span { "{status_label}" }
+            }
+            if unavailable {
+                p { "The selected Execution workspace is unavailable. References were not inspected." }
+            } else if no_references {
+                p { "No instruction or Skill references are configured." }
+            } else {
+                ul {
+                    if let Some(instruction) = inspection.instruction {
+                        AgentBehaviorReferenceRow {
+                            kind: "Instructions",
+                            inspection: instruction,
+                        }
+                    }
+                    for skill in inspection.skills {
+                        AgentBehaviorReferenceRow {
+                            key: "{skill.reference}",
+                            kind: "Skill",
+                            inspection: skill,
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn AgentBehaviorReferenceRow(kind: &'static str, inspection: ReferenceInspection) -> Element {
+    let status_label = reference_status_label(inspection.status);
+    let status_class = reference_status_class(inspection.status);
+    rsx! {
+        li {
+            span { "{kind}" }
+            code { "{inspection.reference}" }
+            em { class: "{status_class}", "{status_label}" }
+        }
+    }
+}
+
+const fn behavior_inspection_status_label(status: BehaviorInspectionStatus) -> &'static str {
+    match status {
+        BehaviorInspectionStatus::Ready => "Present",
+        BehaviorInspectionStatus::NeedsAttention => "Needs attention",
+        BehaviorInspectionStatus::Unsafe => "Unsafe",
+        BehaviorInspectionStatus::WorkspaceUnavailable => "Workspace unavailable",
+        BehaviorInspectionStatus::NoReferences => "No references",
+    }
+}
+
+const fn behavior_inspection_status_class(status: BehaviorInspectionStatus) -> &'static str {
+    match status {
+        BehaviorInspectionStatus::Ready => "inspection-ready",
+        BehaviorInspectionStatus::NeedsAttention => "inspection-missing",
+        BehaviorInspectionStatus::Unsafe => "inspection-unsafe",
+        BehaviorInspectionStatus::WorkspaceUnavailable => "inspection-unavailable",
+        BehaviorInspectionStatus::NoReferences => "inspection-empty",
+    }
+}
+
+const fn reference_status_label(status: ReferenceStatus) -> &'static str {
+    match status {
+        ReferenceStatus::Present => "Present",
+        ReferenceStatus::Missing => "Missing",
+        ReferenceStatus::Unsafe => "Unsafe",
+        ReferenceStatus::NotInspected => "Not inspected",
+    }
+}
+
+const fn reference_status_class(status: ReferenceStatus) -> &'static str {
+    match status {
+        ReferenceStatus::Present => "reference-present",
+        ReferenceStatus::Missing => "reference-missing",
+        ReferenceStatus::Unsafe => "reference-unsafe",
+        ReferenceStatus::NotInspected => "reference-unavailable",
     }
 }
 
