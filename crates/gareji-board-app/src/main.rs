@@ -1,7 +1,12 @@
+use std::env;
+use std::path::PathBuf;
+
 use dioxus::prelude::*;
 use gareji_board_core::CoreProgressReader;
 use gareji_board_domain::{
-    ActivityTimeline, CheckpointDeliveryStatus, CheckpointOutcome, PortfolioSnapshot, ProjectHealth,
+    ActivityTimeline, CheckpointDeliveryStatus, CheckpointOutcome, CheckpointReconciliation,
+    PortfolioSnapshot, ProjectHealth, ReconciliationDecision, ReconciliationReceipt,
+    ReconciliationRequest, WorkItemState,
 };
 use gareji_board_store::{SqliteBoardStore, default_board_database_path};
 
@@ -18,24 +23,26 @@ struct AppState {
     storage_label: String,
     warning: Option<String>,
     activity_warning: Option<String>,
+    reconciliation_notice: Option<String>,
 }
 
 fn load_app_state() -> AppState {
-    let database_path = default_board_database_path();
+    let database_path = board_database_path();
     let storage_label = database_path.display().to_string();
     let loaded = SqliteBoardStore::open(&database_path).and_then(|mut store| {
         store.seed_sample_if_empty()?;
-        store.load_portfolio()
+        let portfolio = store.load_portfolio()?;
+        Ok((store, portfolio))
     });
 
     match loaded {
-        Ok(portfolio) => {
+        Ok((store, portfolio)) => {
             let project_ids = portfolio
                 .projects
                 .iter()
                 .map(|project| project.id.clone())
                 .collect::<Vec<_>>();
-            let (activity, activity_warning) = CoreProgressReader::from_environment()
+            let (mut activity, mut activity_warning) = CoreProgressReader::from_environment()
                 .load_portfolio_activity(&project_ids)
                 .map_or_else(
                     |error| (ActivityTimeline::default(), Some(error.to_string())),
@@ -49,12 +56,16 @@ fn load_app_state() -> AppState {
                         (loaded.timeline, warning)
                     },
                 );
+            if let Err(error) = store.hydrate_activity_reconciliations(&mut activity) {
+                activity_warning = Some(format!("Reconciliation history: {error}"));
+            }
             AppState {
                 portfolio,
                 activity,
                 storage_label,
                 warning: None,
                 activity_warning,
+                reconciliation_notice: None,
             }
         }
         Err(error) => AppState {
@@ -63,17 +74,39 @@ fn load_app_state() -> AppState {
             storage_label,
             warning: Some(error.to_string()),
             activity_warning: None,
+            reconciliation_notice: None,
         },
     }
 }
 
+fn board_database_path() -> PathBuf {
+    env::var_os("GAREJI_BOARD_DB")
+        .filter(|value| !value.is_empty())
+        .map_or_else(default_board_database_path, PathBuf::from)
+}
+
+fn reconcile(request: &ReconciliationRequest) -> Result<ReconciliationReceipt, String> {
+    SqliteBoardStore::open(board_database_path())
+        .and_then(|mut store| store.reconcile_checkpoint(request))
+        .map_err(|error| error.to_string())
+}
+
 #[allow(non_snake_case)]
 fn App() -> Element {
-    let state = use_hook(load_app_state);
-    let project_count = state.portfolio.projects.len();
-    let active_runs = state.portfolio.active_runs();
-    let blocked_items = state.portfolio.blocked_items();
-    let delivery_issues = state.activity.delivery_issues();
+    let mut state = use_signal(load_app_state);
+    let snapshot = state.read().clone();
+    let project_count = snapshot.portfolio.projects.len();
+    let active_runs = snapshot.portfolio.active_runs();
+    let blocked_items = snapshot.portfolio.blocked_items();
+    let delivery_issues = snapshot.activity.delivery_issues();
+    let on_reconcile = move |request: ReconciliationRequest| match reconcile(&request) {
+        Ok(receipt) => {
+            let mut reloaded = load_app_state();
+            reloaded.reconciliation_notice = Some(reconciliation_message(&receipt));
+            state.set(reloaded);
+        }
+        Err(error) => state.write().reconciliation_notice = Some(error),
+    };
 
     rsx! {
         document::Title { "Gareji Board" }
@@ -103,27 +136,36 @@ fn App() -> Element {
                 Metric { value: delivery_issues.to_string(), label: "Delivery issues" }
             }
 
-            if let Some(warning) = &state.warning {
+            if let Some(warning) = &snapshot.warning {
                 aside { class: "warning", "Local data could not be loaded: {warning}" }
             }
 
-            RecentActivity {
-                activity: state.activity.clone(),
-                warning: state.activity_warning.clone(),
+            if let Some(notice) = &snapshot.reconciliation_notice {
+                aside { class: "action-notice", "{notice}" }
             }
 
-            ProjectGrid { portfolio: state.portfolio.clone() }
+            RecentActivity {
+                activity: snapshot.activity.clone(),
+                warning: snapshot.activity_warning.clone(),
+                on_reconcile,
+            }
+
+            ProjectGrid { portfolio: snapshot.portfolio.clone() }
 
             footer { class: "app-footer",
                 span { "Local data" }
-                code { "{state.storage_label}" }
+                code { "{snapshot.storage_label}" }
             }
         }
     }
 }
 
 #[component]
-fn RecentActivity(activity: ActivityTimeline, warning: Option<String>) -> Element {
+fn RecentActivity(
+    activity: ActivityTimeline,
+    warning: Option<String>,
+    on_reconcile: EventHandler<ReconciliationRequest>,
+) -> Element {
     rsx! {
         section { class: "section-heading",
             div {
@@ -180,6 +222,14 @@ fn RecentActivity(activity: ActivityTimeline, warning: Option<String>) -> Elemen
                                     p { class: "delivery-error", "{delivery.destination_id}: {last_error}" }
                                 }
                             }
+                            ReconciliationPanel {
+                                checkpoint_id: item.checkpoint_id.clone(),
+                                project_id: item.project_id.clone(),
+                                work_item_id: item.work_item_id.clone(),
+                                recommended_state: item.recommended_state,
+                                reconciliation: item.reconciliation.clone(),
+                                on_reconcile,
+                            }
                         }
                     }
                 }
@@ -188,6 +238,107 @@ fn RecentActivity(activity: ActivityTimeline, warning: Option<String>) -> Elemen
                 p { class: "older-note", "Older checkpoints are available in Core." }
             }
         }
+    }
+}
+
+#[component]
+fn ReconciliationPanel(
+    checkpoint_id: String,
+    project_id: String,
+    work_item_id: Option<String>,
+    recommended_state: Option<WorkItemState>,
+    reconciliation: Option<CheckpointReconciliation>,
+    on_reconcile: EventHandler<ReconciliationRequest>,
+) -> Element {
+    if let Some(reconciliation) = reconciliation {
+        let detail = if reconciliation.decision == ReconciliationDecision::Accepted
+            && reconciliation.previous_state != reconciliation.resulting_state
+        {
+            format!(
+                "{} → {}",
+                reconciliation.previous_state, reconciliation.resulting_state
+            )
+        } else {
+            format!("State: {}", reconciliation.resulting_state)
+        };
+        return rsx! {
+            div { class: reconciliation_class(reconciliation.decision),
+                strong { "{reconciliation.decision.label()}" }
+                span { "{detail}" }
+            }
+        };
+    }
+    let (Some(work_item_id), Some(recommended_state)) = (work_item_id, recommended_state) else {
+        return rsx! {};
+    };
+    if !recommended_state.is_reconciliation_target() {
+        return rsx! {
+            p { class: "reconciliation-unavailable",
+                "This suggestion requires a separate Work item action."
+            }
+        };
+    }
+
+    let accepted = ReconciliationRequest {
+        checkpoint_id: checkpoint_id.clone(),
+        project_id: project_id.clone(),
+        work_item_id: work_item_id.clone(),
+        recommended_state,
+        decision: ReconciliationDecision::Accepted,
+    };
+    let dismissed = ReconciliationRequest {
+        checkpoint_id,
+        project_id,
+        work_item_id,
+        recommended_state,
+        decision: ReconciliationDecision::Dismissed,
+    };
+    let accept_handler = on_reconcile;
+    rsx! {
+        div { class: "reconciliation-actions",
+            p { "Apply this suggestion to the linked Work item?" }
+            div {
+                button {
+                    class: "accept-action",
+                    onclick: move |_| accept_handler.call(accepted.clone()),
+                    "Accept"
+                }
+                button {
+                    class: "dismiss-action",
+                    onclick: move |_| on_reconcile.call(dismissed.clone()),
+                    "Dismiss"
+                }
+            }
+        }
+    }
+}
+
+fn reconciliation_class(decision: ReconciliationDecision) -> &'static str {
+    match decision {
+        ReconciliationDecision::Accepted => "reconciliation-result reconciliation-accepted",
+        ReconciliationDecision::Dismissed => "reconciliation-result reconciliation-dismissed",
+    }
+}
+
+fn reconciliation_message(receipt: &ReconciliationReceipt) -> String {
+    let reconciliation = &receipt.reconciliation;
+    match reconciliation.decision {
+        ReconciliationDecision::Dismissed => format!(
+            "Suggestion dismissed. Work item remains {}.",
+            reconciliation.resulting_state
+        ),
+        ReconciliationDecision::Accepted
+            if reconciliation.previous_state == reconciliation.resulting_state =>
+        {
+            format!(
+                "Suggestion accepted. Work item was already {}.",
+                reconciliation.resulting_state
+            )
+        }
+        ReconciliationDecision::Accepted => format!(
+            "Suggestion accepted. Work item moved from {} to {}.",
+            reconciliation.previous_state, reconciliation.resulting_state
+        ),
     }
 }
 

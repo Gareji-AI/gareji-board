@@ -47,6 +47,27 @@ impl WorkItemState {
             },
         }
     }
+
+    /// Decide whether one explicit Checkpoint recommendation may be accepted.
+    #[must_use]
+    pub fn can_accept_recommendation(self, recommended: Self) -> bool {
+        if self == recommended {
+            return true;
+        }
+        matches!(
+            self,
+            Self::Todo | Self::InProgress | Self::InReview | Self::Blocked
+        ) && recommended.is_reconciliation_target()
+    }
+
+    /// Identify state recommendations handled by Checkpoint reconciliation.
+    #[must_use]
+    pub const fn is_reconciliation_target(self) -> bool {
+        matches!(
+            self,
+            Self::InProgress | Self::InReview | Self::Blocked | Self::Done
+        )
+    }
 }
 
 impl TryFrom<&str> for WorkItemState {
@@ -250,6 +271,83 @@ pub struct CheckpointDelivery {
     pub last_error: Option<String>,
 }
 
+/// Final Board-owned judgment over one Checkpoint recommendation.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReconciliationDecision {
+    Accepted,
+    Dismissed,
+}
+
+impl ReconciliationDecision {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Accepted => "accepted",
+            Self::Dismissed => "dismissed",
+        }
+    }
+
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Accepted => "Accepted",
+            Self::Dismissed => "Dismissed",
+        }
+    }
+}
+
+impl TryFrom<&str> for ReconciliationDecision {
+    type Error = UnknownReconciliationDecision;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "accepted" => Ok(Self::Accepted),
+            "dismissed" => Ok(Self::Dismissed),
+            _ => Err(UnknownReconciliationDecision),
+        }
+    }
+}
+
+/// Stored reconciliation result displayed with one Activity timeline entry.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CheckpointReconciliation {
+    pub decision: ReconciliationDecision,
+    pub recommended_state: WorkItemState,
+    pub previous_state: WorkItemState,
+    pub resulting_state: WorkItemState,
+}
+
+/// Explicit user intent passed to Board's reconciliation Module.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReconciliationRequest {
+    pub checkpoint_id: String,
+    pub project_id: String,
+    pub work_item_id: String,
+    pub recommended_state: WorkItemState,
+    pub decision: ReconciliationDecision,
+}
+
+/// Durable result from one reconciliation attempt.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReconciliationReceipt {
+    pub checkpoint_id: String,
+    pub duplicate: bool,
+    pub reconciliation: CheckpointReconciliation,
+}
+
+/// Stored reconciliation decision violated the domain vocabulary.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct UnknownReconciliationDecision;
+
+impl fmt::Display for UnknownReconciliationDecision {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("unknown reconciliation decision")
+    }
+}
+
+impl std::error::Error for UnknownReconciliationDecision {}
+
 /// One accepted Core checkpoint adapted for Board presentation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProgressActivity {
@@ -262,6 +360,7 @@ pub struct ProgressActivity {
     pub summary: String,
     pub recommended_state: Option<WorkItemState>,
     pub deliveries: Vec<CheckpointDelivery>,
+    pub reconciliation: Option<CheckpointReconciliation>,
 }
 
 /// Bounded Board read model derived from Core-owned Progress Checkpoints.
@@ -413,10 +512,24 @@ mod tests {
                         last_error: Some("unavailable".to_owned()),
                     },
                 ],
+                reconciliation: None,
             }],
             has_older: false,
         };
 
         assert_eq!(timeline.delivery_issues(), 1);
+    }
+
+    #[test]
+    fn checkpoint_recommendations_use_the_safe_reconciliation_subset() {
+        assert!(WorkItemState::Todo.can_accept_recommendation(WorkItemState::InProgress));
+        assert!(WorkItemState::InProgress.can_accept_recommendation(WorkItemState::Done));
+        assert!(WorkItemState::Blocked.can_accept_recommendation(WorkItemState::InReview));
+        assert!(WorkItemState::Done.can_accept_recommendation(WorkItemState::Done));
+
+        assert!(!WorkItemState::Backlog.can_accept_recommendation(WorkItemState::InProgress));
+        assert!(!WorkItemState::InReview.can_accept_recommendation(WorkItemState::Todo));
+        assert!(!WorkItemState::Done.can_accept_recommendation(WorkItemState::InReview));
+        assert!(!WorkItemState::Cancelled.can_accept_recommendation(WorkItemState::Done));
     }
 }

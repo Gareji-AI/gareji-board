@@ -137,13 +137,16 @@ fn map_store_error(request_id: String, error: &StoreError) -> BoardBridgeRespons
             BoardBridgeErrorCode::WorkItemNotFound,
             "Work item was not found in the requested project",
         ),
-        StoreError::CreateDirectory(_) | StoreError::Sqlite(_) | StoreError::CorruptState(_) => {
-            error_response(
-                request_id,
-                BoardBridgeErrorCode::InternalError,
-                "local Board operation failed",
-            )
-        }
+        StoreError::AlreadyReconciled
+        | StoreError::UnsupportedReconciliation
+        | StoreError::ConcurrentChange
+        | StoreError::CreateDirectory(_)
+        | StoreError::Sqlite(_)
+        | StoreError::CorruptState(_) => error_response(
+            request_id,
+            BoardBridgeErrorCode::InternalError,
+            "local Board operation failed",
+        ),
     }
 }
 
