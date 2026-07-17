@@ -2031,6 +2031,24 @@ fn workspace_repository_label(inspection: &ExecutionWorkspaceInspection) -> Stri
     }
 }
 
+fn workspace_instruction_discovery_note(
+    availability: WorkspaceAvailability,
+    has_no_instructions: bool,
+) -> &'static str {
+    if !has_no_instructions {
+        return "";
+    }
+    match availability {
+        WorkspaceAvailability::BundledSample => {
+            "Bundled sample instructions are inspected from the Agent catalog."
+        }
+        WorkspaceAvailability::Available => "No root AGENTS.md was detected.",
+        WorkspaceAvailability::Unavailable => {
+            "Instruction discovery is unavailable until the directory returns."
+        }
+    }
+}
+
 fn workspace_skill_discovery_note(
     availability: WorkspaceAvailability,
     has_no_skills: bool,
@@ -2252,6 +2270,11 @@ fn ProjectCard(
     let availability_label = workspace_availability_label(workspace_inspection.availability);
     let availability_class = workspace_availability_class(workspace_inspection.availability);
     let repository_label = workspace_repository_label(&workspace_inspection);
+    let workspace_instruction_files = workspace_inspection.workspace_instruction_files.clone();
+    let instruction_discovery_note = workspace_instruction_discovery_note(
+        workspace_inspection.availability,
+        workspace_instruction_files.is_empty(),
+    );
     let discovered_skill_ids = workspace_inspection.discovered_skill_ids.clone();
     let skill_discovery_note = workspace_skill_discovery_note(
         workspace_inspection.availability,
@@ -2288,6 +2311,19 @@ fn ProjectCard(
                     div {
                         dt { "Repository" }
                         dd { "{repository_label}" }
+                    }
+                }
+                div { class: "workspace-instructions",
+                    span { "Workspace instructions" }
+                    if workspace_instruction_files.is_empty() {
+                        p { "{instruction_discovery_note}" }
+                    } else {
+                        ul {
+                            for instruction_file in workspace_instruction_files {
+                                li { code { "{instruction_file}" } }
+                            }
+                        }
+                        small { "Presence only; instructions are not loaded or applied." }
                     }
                 }
                 div { class: "workspace-discovered-skills",

@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use gareji_board_domain::{ExecutionWorkspaceConnection, ExecutionWorkspaceKind};
 
 const MAX_DISCOVERED_SKILLS: usize = 32;
+const WORKSPACE_INSTRUCTION_CANDIDATES: &[&str] = &["AGENTS.md"];
 
 /// UI-facing connection seam for existing local Execution workspaces.
 pub struct ExecutionWorkspaceConnector;
@@ -13,6 +14,7 @@ pub struct ExecutionWorkspaceConnector;
 pub struct ExecutionWorkspaceInspection {
     pub availability: WorkspaceAvailability,
     pub repository_root: Option<String>,
+    pub workspace_instruction_files: Vec<String>,
     pub discovered_skill_ids: Vec<String>,
 }
 
@@ -67,6 +69,7 @@ impl ExecutionWorkspaceConnector {
             (ExecutionWorkspaceKind::BundledSample, None) => ExecutionWorkspaceInspection {
                 availability: WorkspaceAvailability::BundledSample,
                 repository_root: None,
+                workspace_instruction_files: Vec::new(),
                 discovered_skill_ids: Vec::new(),
             },
             (ExecutionWorkspaceKind::LocalDirectory, Some(location)) => {
@@ -88,6 +91,7 @@ fn inspect_local_directory(location: &Path) -> ExecutionWorkspaceInspection {
         availability: WorkspaceAvailability::Available,
         repository_root: nearest_git_root(&canonical)
             .and_then(|root| displayable_canonical_path(&root)),
+        workspace_instruction_files: discover_workspace_instruction_files(&canonical),
         discovered_skill_ids: discover_skill_ids(&canonical),
     }
 }
@@ -96,6 +100,7 @@ fn unavailable_inspection() -> ExecutionWorkspaceInspection {
     ExecutionWorkspaceInspection {
         availability: WorkspaceAvailability::Unavailable,
         repository_root: None,
+        workspace_instruction_files: Vec::new(),
         discovered_skill_ids: Vec::new(),
     }
 }
@@ -105,6 +110,18 @@ fn nearest_git_root(start: &Path) -> Option<PathBuf> {
         let marker = candidate.join(".git");
         (marker.is_dir() || marker.is_file()).then(|| candidate.to_path_buf())
     })
+}
+
+fn discover_workspace_instruction_files(canonical_root: &Path) -> Vec<String> {
+    WORKSPACE_INSTRUCTION_CANDIDATES
+        .iter()
+        .filter_map(|relative| {
+            let candidate = canonical_root.join(relative);
+            let canonical_file = fs::canonicalize(candidate).ok()?;
+            (canonical_file.starts_with(canonical_root) && canonical_file.is_file())
+                .then(|| (*relative).to_owned())
+        })
+        .collect()
 }
 
 fn discover_skill_ids(canonical_root: &Path) -> Vec<String> {
@@ -240,6 +257,24 @@ mod tests {
         assert_eq!(
             inspection.discovered_skill_ids,
             vec!["evidence_summary".to_owned(), "write-handoff".to_owned()]
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn inspection_discovers_root_agents_instructions_by_relative_path_only() {
+        let root = temporary_directory("workspace-instructions");
+        fs::write(root.join("AGENTS.md"), "private instructions").unwrap();
+        let connection = ExecutionWorkspaceConnection {
+            project_id: "gareji-board".to_owned(),
+            kind: ExecutionWorkspaceKind::LocalDirectory,
+            location: Some(root.display().to_string()),
+        };
+
+        let inspection = ExecutionWorkspaceConnector::inspect_connection(Some(&connection));
+        assert_eq!(
+            inspection.workspace_instruction_files,
+            vec!["AGENTS.md".to_owned()]
         );
         fs::remove_dir_all(root).unwrap();
     }
