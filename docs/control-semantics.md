@@ -56,6 +56,14 @@ The Work item control surface lets a person atomically change the assigned Agent
 
 An Agent plan may deliberately be unassigned or require a capability that no current Agent profile declares. Such a plan is valid scheduling intent, but Safe Autopilot skips the Work item until a suitable profile is assigned. A referenced Agent profile must exist when the update is applied. Agent plan updates do not create a Run, select a model, or grant Core capability.
 
+## Explicit Agent profile management
+
+The Agent catalog lets a person create a Board-owned Agent profile or atomically replace an existing profile's role and declared Agent capabilities. A profile ID is a stable lowercase identifier and cannot be renamed after creation. The v0 control surface does not delete profiles because Work items may still refer to them.
+
+An edit request carries the complete Agent profile the person observed; Board rejects the change when the stored role or capabilities changed first instead of overwriting newer coordination. Saving an identical existing profile is an idempotent no-op. A profile with no declared capabilities is valid, but it cannot satisfy a Work item with capability requirements.
+
+Changing a profile does not rewrite any Work item's Agent plan. Because Safe Autopilot evaluates the current catalog, removing a declared capability can immediately make an assigned Work item ineligible until a person repairs the profile or Work item. Profile management does not create a Run, select a model, attach instructions or Skills, or grant Core capability.
+
 ## Controller stop and fast exit
 
 A controller-wide `decision=stop` means no candidate may start during that tick. The current compatibility rules stop when:
