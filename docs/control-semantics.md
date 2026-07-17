@@ -113,6 +113,12 @@ The desktop Board may evaluate a bounded candidate preview before Runner executi
 
 The v0 preview considers only canonical `todo` Work items whose Board project is below its execution cap, whose persisted Approval requirement is `none`, whose persisted Work item dependencies are done-like, and whose assigned Agent profile declares every required Agent capability. A dependency on canonical `done` or `cancelled` is done-like; supported import aliases are normalized before evaluation. An explicit Approval requirement is skipped until a later execution path can supply trusted, operation-bound approval evidence.
 
+## Direct Work item creation
+
+A person may add a new Work item directly to any existing Board project without first receiving a Checkpoint. Creation requires an explicit stable Work item ID, title, and positive priority. The created item starts in `todo`, with no dependencies, no Agent assignment, no Agent capability requirements, and no approval requirement. It is scheduling intent only: creating it does not start a Run, reserve capacity, read the Execution workspace, or grant execution authority.
+
+Direct creation is separate from Activity Inbox attachment. Creating from an Inbox Checkpoint remains the atomic operation that preserves its final Checkpoint association; direct creation creates no evidence record or inferred association.
+
 An unassigned Work item is skipped because Runner has no intended Agent profile. When an assigned profile lacks several requirements, the preview reports the first missing Agent capability in stable lexical order. These Board scheduling claims do not replace Core capability policy or trusted approval evidence. An assignment referring to a missing Agent profile fails closed as corrupt coordination input.
 
 Runnable candidates are ranked deterministically by:
