@@ -81,9 +81,11 @@ These conditions skip one candidate while allowing the controller to consider an
 
 ## Read-only candidate preview
 
-The desktop Board may evaluate a bounded candidate preview before Runner execution is connected. This preview is explanatory only: it never creates a Run, changes Work item state, reserves capacity, records approval evidence, or grants execution authority. Cooldown, agent-capability, workspace, and evidence preflights remain required before a later execution path may start the selected item.
+The desktop Board may evaluate a bounded candidate preview before Runner execution is connected. This preview is explanatory only: it never creates a Run, changes Work item state, reserves capacity, records approval evidence, or grants execution authority. Cooldown, Core-capability, workspace, and evidence preflights remain required before a later execution path may start the selected item.
 
-The v0 preview considers only canonical `todo` Work items whose Board project is below its execution cap, whose persisted Approval requirement is `none`, and whose persisted Work item dependencies are done-like. A dependency on canonical `done` or `cancelled` is done-like; supported import aliases are normalized before evaluation. An explicit Approval requirement is skipped until a later execution path can supply trusted, operation-bound approval evidence.
+The v0 preview considers only canonical `todo` Work items whose Board project is below its execution cap, whose persisted Approval requirement is `none`, whose persisted Work item dependencies are done-like, and whose assigned Agent profile declares every required Agent capability. A dependency on canonical `done` or `cancelled` is done-like; supported import aliases are normalized before evaluation. An explicit Approval requirement is skipped until a later execution path can supply trusted, operation-bound approval evidence.
+
+An unassigned Work item is skipped because Runner has no intended Agent profile. When an assigned profile lacks several requirements, the preview reports the first missing Agent capability in stable lexical order. These Board scheduling claims do not replace Core capability policy or trusted approval evidence. An assignment referring to a missing Agent profile fails closed as corrupt coordination input.
 
 Runnable candidates are ranked deterministically by:
 
@@ -92,9 +94,9 @@ Runnable candidates are ranked deterministically by:
 3. project ID;
 4. Work item ID.
 
-The preview reports state-ineligible, project-capacity, approval-required, first-unresolved-dependency, and lower-ranked candidates separately so the person can understand the result. Reaching the configured global concurrency cap or finding no runnable candidate returns `decision=continue`, no candidate, and `fast_exit_required=true`; it is not a failure. A zero global cap, a duplicate Work item identity, a Work item whose project is missing from the portfolio, or a dependency whose Work item is missing fails closed with `decision=stop`, no candidate, and `fast_exit_required=true`.
+The preview reports state-ineligible, project-capacity, approval-required, first-unresolved-dependency, unassigned, missing-Agent-capability, and lower-ranked candidates separately so the person can understand the result. Reaching the configured global concurrency cap or finding no runnable candidate returns `decision=continue`, no candidate, and `fast_exit_required=true`; it is not a failure. A zero global cap, a duplicate Work item or Agent profile identity, a Work item whose project is missing from the portfolio, a dependency whose Work item is missing, or an assignment whose Agent profile is missing fails closed with `decision=stop`, no candidate, and `fast_exit_required=true`.
 
-Work items created from the Activity Inbox receive priority `100` until explicit priority editing is implemented. The bundled desktop sample uses a global preview concurrency cap of `2`.
+Work items created from the Activity Inbox receive priority `100` and no Agent assignment until explicit editing is implemented. The bundled desktop sample uses a global preview concurrency cap of `2`.
 
 ## Compatibility defaults
 

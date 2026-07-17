@@ -46,10 +46,14 @@ The hackathon demo sets the workspace default to `gpt-5.6`. The product interfac
 
 ```yaml
 id: researcher
+role: Researcher
 instructions: agents/researcher/AGENT.md
 skills:
   - web-research
   - evidence-summary
+capabilities:
+  - research
+  - evidence
 codex_profile: safe-research
 model: inherit
 sandbox: workspace-write
@@ -57,6 +61,8 @@ timeout_minutes: 20
 ```
 
 `codex_profile` selects technical Codex configuration such as sandbox, reasoning effort, and MCP setup. `model` only selects the execution model. Neither field defines the agent's role.
+
+Agent capabilities are Board scheduling claims such as `research`, `implementation`, `review`, or `release`. A Work item declares the capabilities it needs and is assigned one Agent profile; Safe Autopilot skips it when the assignment is absent or the profile lacks a requirement. These claims do not grant filesystem, secret, publication, or production permissions. Core evaluates those execution capabilities separately for the concrete Run operation.
 
 ## Codex invocation
 

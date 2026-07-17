@@ -62,6 +62,18 @@ _Avoid_: blocker text, Run ordering
 The Board-owned indication that starting a Work item needs an explicit human decision in addition to Core capability policy. It is not approval evidence and does not grant a capability.
 _Avoid_: capability grant, automatic approval
 
+**Agent profile**:
+A stable Board-owned description of an agent role, its declared Agent capabilities, and references to its instructions and execution configuration. It is not a running agent or a model selection.
+_Avoid_: agent process, model, prompt
+
+**Agent capability**:
+A Board scheduling claim that an Agent profile is suitable for a kind of work. It is distinct from a Core capability, which grants permission for a concrete execution operation.
+_Avoid_: Core capability, Skill, permission
+
+**Agent assignment**:
+The Board-owned relationship selecting one Agent profile for a Work item. Assignment establishes intended responsibility but does not start a Run.
+_Avoid_: Run, agent process
+
 **Active Work assessment**:
 The Board-owned judgment that a specific Work item may be associated with current direct or Runner work. `todo`, `in_progress`, and `in_review` are eligible; unadmitted, blocked, and terminal work is not.
 _Avoid_: Core permission, inferred branch match
