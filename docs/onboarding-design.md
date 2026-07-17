@@ -8,9 +8,11 @@ Gareji Board has two first-launch paths. Both produce the same Board project mod
 
 The launcher copies writable demo material into an application-owned session directory. Knowledge notes come from the demo Knowledge workspace; Agent instructions and Skills come from the separate demo Execution workspace fixture. It never writes into either bundled fixture, a personal knowledge workspace, or an existing source repository. The user can reset the session to its original state.
 
-## Connect an existing execution workspace
+## Add or connect an existing execution workspace
 
-For an existing Board project, the user selects an existing local repository or directory. Gareji Board resolves the directory and stores an in-place Execution workspace connection; it does not relocate, copy, initialize, or publish the project. The v0 Board stores at most one selected Execution workspace connection per Board project. Replacing it is an explicit local configuration change, not a source-code operation.
+The user may add an existing local repository or directory as a new Board project, or select one for an existing Board project. Adding creates an `idle` Board project with an explicitly supplied stable ID, display name, and positive execution capacity, together with its first local Execution workspace connection in one local operation. It does not derive a Board identity from source files, repository metadata, or a knowledge workspace.
+
+Gareji Board resolves the selected directory and stores an in-place Execution workspace connection; it does not relocate, copy, initialize, or publish the project. The v0 Board stores at most one selected Execution workspace connection per Board project. Replacing it is an explicit local configuration change, not a source-code operation.
 
 The connection flow shows:
 
@@ -46,11 +48,12 @@ The integration exits without recording when the current directory is not inside
 
 ## Workspace Onboarding module
 
-The module exposes two operations:
+The module exposes three operations:
 
 ```text
 open_sample() -> Board session
+add_existing_project(project_id, name, execution_cap, path) -> Board project + Execution workspace connection
 connect_execution_workspace(project_id, path) -> Execution workspace connection
 ```
 
-Fixture materialization, path validation, repository detection, instruction discovery, Skill discovery, identity generation, and connection diagnostics remain inside the module. Callers receive a validated session or connection plus bounded diagnostics; they do not reproduce onboarding rules. Access-policy selection is deferred until Runner wiring, because connecting a directory alone must not grant execution authority.
+Adding a project is atomic: a rejected or duplicate Board identity leaves no connection behind, and an unavailable directory leaves no project behind. Fixture materialization, path validation, repository detection, instruction discovery, Skill discovery, and connection diagnostics remain inside the module. Callers receive a validated session or connection plus bounded diagnostics; they do not reproduce onboarding rules. Access-policy selection is deferred until Runner wiring, because connecting a directory alone must not grant execution authority.

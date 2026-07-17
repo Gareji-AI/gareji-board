@@ -47,7 +47,7 @@ An independently developed and releasable part of the Gareji portfolio, such as 
 _Avoid_: plugin collection, repository group
 
 **Board project**:
-A unit of coordinated work derived from a project directory or explicitly mapped from a connected knowledge workspace. In the Gareji portfolio, each product has its own Board project, execution workspaces, work items, health, capacity, and approval policy.
+A unit of coordinated work derived from a project directory, explicitly mapped from a connected knowledge workspace, or explicitly added from an existing Execution workspace. In the Gareji portfolio, each product has its own Board project, execution workspaces, work items, health, capacity, and approval policy.
 _Avoid_: note application, vault
 
 **Work item state**:
