@@ -26,6 +26,8 @@ A non-Git directory is valid. A missing, unreadable, or moved directory remains 
 
 The project card performs a fresh, read-only connection check when it is displayed. It reports whether the selected local directory is available and, when an ancestor contains a `.git` file or directory, the nearest Git repository root. The check does not read source contents, inspect branches or remotes, invoke Git, create a worktree, or change Runner eligibility; Runner repeats its own authoritative preflight immediately before a Run.
 
+For the Codex-first v0, the project card also lists a root `AGENTS.md` when it resolves to a regular file below the canonical Execution workspace root. It reports the relative path only: Board does not read or copy the instructions, apply them to an Agent profile, or treat their presence as execution approval.
+
 ## Skill trust
 
 Bundled Skills are inspectable and enabled in the sample. Project-local Skills may be discovered at `.agents/skills/<skill-id>/SKILL.md` under the connected Execution workspace but remain disabled until the user explicitly enables them for that project. Gareji Board does not download or install remote Skills during onboarding.
