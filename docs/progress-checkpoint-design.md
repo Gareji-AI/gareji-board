@@ -51,6 +51,8 @@ Validation, workspace resolution, redaction, idempotency, durable outbox writes,
 
 The only MCP tool that creates progress is `record_progress`. MCP does not expose a capture-time `complete_work_item` shortcut. A checkpoint carries `recommended_state`; Gareji Board applies or requests approval for the actual transition.
 
+The first Board approval flow records one final reconciliation decision per linked Checkpoint. An accepted supported recommendation and its Work item transition commit together; a dismissed recommendation leaves state unchanged. Core's Checkpoint is never edited, and correcting a past decision uses a separate Work item action so the evidence trail remains understandable.
+
 ## Task linking
 
 The preferred link is an explicit Work item selected in Gareji Board or passed to `gareji checkpoint`. If no Work item is supplied, the Recorder resolves the connected execution workspace and places the checkpoint in that project's Activity Inbox.

@@ -30,7 +30,7 @@ Work item + sourced context + policy
 
 Direct human-Codex work enters at the Progress Recorder instead of the Runner. It therefore produces the same Checkpoint and timeline without pretending that Board started the execution.
 
-The desktop Board reads recent accepted checkpoints through Core's bounded local Bridge and converts them into an Activity timeline. It never opens Core SQLite tables. Recommended states remain visible suggestions, and delivery failures remain visible per destination; neither changes Board-owned Work item state automatically.
+The desktop Board reads recent accepted checkpoints through Core's bounded local Bridge and converts them into an Activity timeline. It never opens Core SQLite tables. Recommended states remain visible suggestions until a person accepts or dismisses them; an accepted supported recommendation and the Board-owned Work item update are stored atomically. Delivery failures remain visible per destination and never change Work item state.
 
 ## Replaceable seams
 
@@ -52,6 +52,6 @@ These seams stay small. Provider fields, delivery retries, conflict rules, and t
 
 ## Implementation status
 
-Gareji Core provides the first Capability Gate, SQLite-backed Progress Recorder, Project Registry, and local Core Bridge. Gareji Board exposes a local Bridge that assesses Work item existence, project relationship, and active-work eligibility from live Board SQLite state. The desktop portfolio reads its coordination cards from Board SQLite and its recent Activity timeline through Core; Board-to-Runner execution and state reconciliation are not wired yet.
+Gareji Core provides the first Capability Gate, SQLite-backed Progress Recorder, Project Registry, and local Core Bridge. Gareji Board exposes a local Bridge that assesses Work item existence, project relationship, and active-work eligibility from live Board SQLite state. The desktop portfolio reads its coordination cards from Board SQLite, reads its recent Activity timeline through Core, and records explicit Checkpoint reconciliation decisions. Board-to-Runner execution and automatic controller reconciliation are not wired yet.
 
 Board mirrors Core's canonical `progress-checkpoint-v0` transport schema for local validation. The mirrored copies must remain JSON-equivalent; Board does not redefine the Checkpoint contract.

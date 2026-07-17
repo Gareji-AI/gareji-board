@@ -38,6 +38,12 @@ Before selecting new `todo` work, the controller reconciles stale state:
 - an evidence-preflight failure returns the item to `backlog` with a handoff;
 - a completed `in_review` item with `pr_required=false`, no PR artifact, and no human-review requirement may become `done` automatically.
 
+## Checkpoint recommendation review
+
+A linked Progress Checkpoint may recommend a Work item state, but Board does not apply it during intake. The Activity timeline offers an explicit accept or dismiss decision. Accepting `in_progress`, `in_review`, `blocked`, or `done` updates the linked non-terminal Work item and records the decision atomically; accepting the current state is an idempotent no-change decision. Dismissing records the judgment without changing state. Recommendations to `backlog`, `todo`, or `cancelled` require a separate explicit Work item action because they represent admission, retry, or termination policy rather than progress reconciliation.
+
+Each Checkpoint receives at most one reconciliation decision. A later correction changes the Work item through its own explicit action and does not rewrite the historical judgment or the immutable Checkpoint.
+
 ## Controller stop and fast exit
 
 A controller-wide `decision=stop` means no candidate may start during that tick. The current compatibility rules stop when:

@@ -92,6 +92,10 @@ _Avoid_: backlog, failed sync
 The Board's read-only chronological view of accepted Progress Checkpoints, state recommendations, and delivery results. It presents Core-owned progress evidence without becoming another checkpoint ledger or applying Work item transitions.
 _Avoid_: task history, mutable log
 
+**Reconciliation decision**:
+The Board-owned, final judgment to accept or dismiss one Progress Checkpoint's state recommendation. Accepting may transition the linked Work item; dismissing preserves its current state, and neither action changes the Checkpoint.
+_Avoid_: checkpoint edit, automatic transition
+
 **Checkpoint delivery**:
 The projection status of one Progress Checkpoint to a destination: `pending`, `synced`, `conflict`, or `failed`. Delivery state does not change the immutable checkpoint or the Work item state.
 _Avoid_: Work item state, Run state
