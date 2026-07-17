@@ -50,6 +50,10 @@ _Avoid_: note application, vault
 The Gareji lifecycle classification of a unit of work: `backlog`, `todo`, `in_progress`, `in_review`, `blocked`, `done`, or `cancelled`. A failed execution is a Run outcome, not a Work item state.
 _Avoid_: Run state, failure category
 
+**Work item transition**:
+An explicit Board-owned change from one Work item state to another. A human transition is distinct from accepting a Checkpoint recommendation or reconciling a Run.
+_Avoid_: checkpoint decision, Run outcome
+
 **Active Work assessment**:
 The Board-owned judgment that a specific Work item may be associated with current direct or Runner work. `todo`, `in_progress`, and `in_review` are eligible; unadmitted, blocked, and terminal work is not.
 _Avoid_: Core permission, inferred branch match

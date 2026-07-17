@@ -46,6 +46,10 @@ A linked Progress Checkpoint may recommend a Work item state, but Board does not
 
 Each Checkpoint receives at most one reconciliation decision. A later correction changes the Work item through its own explicit action and does not rewrite the historical judgment or the immutable Checkpoint.
 
+## Explicit human transitions
+
+The Work item control surface lets a person explicitly select any canonical Work item state. The request carries the state the person observed; Board rejects the change when the stored state has moved since that observation instead of overwriting newer coordination. Selecting the already-stored state is an idempotent no-op. A human transition changes only the Board-owned Work item and does not rewrite a Checkpoint, attachment, reconciliation decision, or Run outcome.
+
 ## Controller stop and fast exit
 
 A controller-wide `decision=stop` means no candidate may start during that tick. The current compatibility rules stop when:
