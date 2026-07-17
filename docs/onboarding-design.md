@@ -30,6 +30,8 @@ The project card performs a fresh, read-only connection check when it is display
 
 Bundled Skills are inspectable and enabled in the sample. Project-local Skills may be discovered at `.agents/skills/<skill-id>/SKILL.md` under the connected Execution workspace but remain disabled until the user explicitly enables them for that project. Gareji Board does not download or install remote Skills during onboarding.
 
+The project card lists only stable Skill IDs whose `SKILL.md` resolves to a regular file below the canonical Execution workspace root. Discovery reads directory and file identity only; it does not read Skill contents, follow a Skill that escapes through a symbolic link, install anything, or make a Skill runnable.
+
 Agent profiles reference Skills by stable ID. Instructions, Skills, runtime, and model remain separate choices so a user can change the model without redefining the agent.
 
 ## Codex integration enablement
