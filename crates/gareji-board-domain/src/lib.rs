@@ -463,6 +463,24 @@ pub struct WorkItemSummary {
     pub state: WorkItemState,
 }
 
+/// Explicit human intent to change one Board-owned Work item state.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WorkItemTransitionRequest {
+    pub project_id: String,
+    pub work_item_id: String,
+    pub expected_state: WorkItemState,
+    pub target_state: WorkItemState,
+}
+
+/// Durable result of one explicit Work item transition attempt.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WorkItemTransitionReceipt {
+    pub work_item_id: String,
+    pub previous_state: WorkItemState,
+    pub resulting_state: WorkItemState,
+    pub changed: bool,
+}
+
 /// Counts needed by the portfolio screen without exposing storage rows.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct WorkItemCounts {

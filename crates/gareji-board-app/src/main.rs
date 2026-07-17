@@ -7,11 +7,21 @@ use gareji_board_domain::{
     ActivityTimeline, AttachmentReceipt, AttachmentRequest, AttachmentTarget,
     CheckpointDeliveryStatus, CheckpointOutcome, CheckpointReconciliation, PortfolioSnapshot,
     ProgressActivity, ProjectHealth, ReconciliationDecision, ReconciliationReceipt,
-    ReconciliationRequest, WorkItemState, WorkItemSummary,
+    ReconciliationRequest, WorkItemState, WorkItemSummary, WorkItemTransitionReceipt,
+    WorkItemTransitionRequest,
 };
 use gareji_board_store::{SqliteBoardStore, default_board_database_path};
 
 const APP_CSS: &str = include_str!("style.css");
+const WORK_ITEM_STATES: [WorkItemState; 7] = [
+    WorkItemState::Backlog,
+    WorkItemState::Todo,
+    WorkItemState::InProgress,
+    WorkItemState::InReview,
+    WorkItemState::Blocked,
+    WorkItemState::Done,
+    WorkItemState::Cancelled,
+];
 
 fn main() {
     dioxus::launch(App);
@@ -27,6 +37,7 @@ struct AppState {
     activity_warning: Option<String>,
     reconciliation_notice: Option<String>,
     attachment_notice: Option<String>,
+    transition_notice: Option<String>,
 }
 
 fn load_app_state() -> AppState {
@@ -72,6 +83,7 @@ fn load_app_state() -> AppState {
                 activity_warning,
                 reconciliation_notice: None,
                 attachment_notice: None,
+                transition_notice: None,
             }
         }
         Err(error) => AppState {
@@ -83,6 +95,7 @@ fn load_app_state() -> AppState {
             activity_warning: None,
             reconciliation_notice: None,
             attachment_notice: None,
+            transition_notice: None,
         },
     }
 }
@@ -102,6 +115,14 @@ fn reconcile(request: &ReconciliationRequest) -> Result<ReconciliationReceipt, S
 fn attach(request: &AttachmentRequest) -> Result<AttachmentReceipt, String> {
     SqliteBoardStore::open(board_database_path())
         .and_then(|mut store| store.attach_checkpoint(request))
+        .map_err(|error| error.to_string())
+}
+
+fn transition_work_item(
+    request: &WorkItemTransitionRequest,
+) -> Result<WorkItemTransitionReceipt, String> {
+    SqliteBoardStore::open(board_database_path())
+        .and_then(|mut store| store.transition_work_item(request))
         .map_err(|error| error.to_string())
 }
 
@@ -129,6 +150,15 @@ fn App() -> Element {
         }
         Err(error) => state.write().reconciliation_notice = Some(error),
     };
+    let on_transition =
+        move |request: WorkItemTransitionRequest| match transition_work_item(&request) {
+            Ok(receipt) => {
+                let mut reloaded = load_app_state();
+                reloaded.transition_notice = Some(transition_message(&receipt));
+                state.set(reloaded);
+            }
+            Err(error) => state.write().transition_notice = Some(error),
+        };
 
     rsx! {
         document::Title { "Gareji Board" }
@@ -170,6 +200,10 @@ fn App() -> Element {
                 aside { class: "action-notice", "{notice}" }
             }
 
+            if let Some(notice) = &snapshot.transition_notice {
+                aside { class: "action-notice", "{notice}" }
+            }
+
             ActivityInbox {
                 activity: snapshot.activity.clone(),
                 work_items: snapshot.work_items.clone(),
@@ -180,6 +214,11 @@ fn App() -> Element {
                 activity: snapshot.activity.clone(),
                 warning: snapshot.activity_warning.clone(),
                 on_reconcile,
+            }
+
+            WorkItemControl {
+                work_items: snapshot.work_items.clone(),
+                on_transition,
             }
 
             ProjectGrid { portfolio: snapshot.portfolio.clone() }
@@ -550,6 +589,134 @@ fn reconciliation_class(decision: ReconciliationDecision) -> &'static str {
     }
 }
 
+#[component]
+fn WorkItemControl(
+    work_items: Vec<WorkItemSummary>,
+    on_transition: EventHandler<WorkItemTransitionRequest>,
+) -> Element {
+    let work_item_count = work_items.len();
+    rsx! {
+        section { class: "section-heading",
+            div {
+                p { class: "kicker", "State authority" }
+                h3 { "Work items" }
+            }
+            span { "{work_item_count} total" }
+        }
+
+        if work_items.is_empty() {
+            section { class: "empty-work-items",
+                strong { "No Work items yet" }
+                p { "Create one from an Activity Inbox Checkpoint to begin." }
+            }
+        } else {
+            section { class: "work-item-grid", aria_label: "Board Work items",
+                for item in work_items {
+                    WorkItemCard {
+                        key: "{item.id}",
+                        item,
+                        on_transition,
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn WorkItemCard(
+    item: WorkItemSummary,
+    on_transition: EventHandler<WorkItemTransitionRequest>,
+) -> Element {
+    let observed_state = item.state;
+    let mut target = use_signal(move || observed_state);
+    let target_state = *target.read();
+    let can_update = target_state != observed_state;
+    let request = WorkItemTransitionRequest {
+        project_id: item.project_id.clone(),
+        work_item_id: item.id.clone(),
+        expected_state: observed_state,
+        target_state,
+    };
+    rsx! {
+        article { class: "work-item-card",
+            div { class: "work-item-head",
+                div {
+                    p { class: "work-item-id", "{item.id}" }
+                    h4 { "{item.title}" }
+                }
+                span { class: work_item_state_class(item.state),
+                    "{work_item_state_label(item.state)}"
+                }
+            }
+            p { class: "work-item-project", "{item.project_id}" }
+            p { class: "work-item-eligibility", "{work_item_eligibility_label(item.state)}" }
+            div { class: "work-item-actions",
+                label {
+                    span { "Move to" }
+                    select {
+                        aria_label: "New state for {item.id}",
+                        value: "{target_state.as_str()}",
+                        onchange: move |event| {
+                            if let Ok(state) = WorkItemState::try_from(event.value().as_str()) {
+                                target.set(state);
+                            }
+                        },
+                        for state in WORK_ITEM_STATES {
+                            option {
+                                value: "{state.as_str()}",
+                                selected: state == target_state,
+                                "{work_item_state_label(state)}"
+                            }
+                        }
+                    }
+                }
+                button {
+                    class: "transition-action",
+                    disabled: !can_update,
+                    onclick: move |_| on_transition.call(request.clone()),
+                    "Update state"
+                }
+            }
+        }
+    }
+}
+
+fn work_item_state_label(state: WorkItemState) -> &'static str {
+    match state {
+        WorkItemState::Backlog => "Backlog",
+        WorkItemState::Todo => "Todo",
+        WorkItemState::InProgress => "In progress",
+        WorkItemState::InReview => "In review",
+        WorkItemState::Blocked => "Blocked",
+        WorkItemState::Done => "Done",
+        WorkItemState::Cancelled => "Cancelled",
+    }
+}
+
+fn work_item_state_class(state: WorkItemState) -> &'static str {
+    match state {
+        WorkItemState::Backlog => "work-item-state state-backlog",
+        WorkItemState::Todo => "work-item-state state-todo",
+        WorkItemState::InProgress => "work-item-state state-running",
+        WorkItemState::InReview => "work-item-state state-review",
+        WorkItemState::Blocked => "work-item-state state-blocked",
+        WorkItemState::Done => "work-item-state state-done",
+        WorkItemState::Cancelled => "work-item-state state-cancelled",
+    }
+}
+
+fn work_item_eligibility_label(state: WorkItemState) -> &'static str {
+    match state {
+        WorkItemState::Todo | WorkItemState::InProgress | WorkItemState::InReview => {
+            "Eligible for active-work association"
+        }
+        WorkItemState::Backlog => "Not admitted to the executable queue",
+        WorkItemState::Blocked => "Waiting for an explicit unblock",
+        WorkItemState::Done | WorkItemState::Cancelled => "Terminal Work item",
+    }
+}
+
 fn reconciliation_message(receipt: &ReconciliationReceipt) -> String {
     let reconciliation = &receipt.reconciliation;
     match reconciliation.decision {
@@ -587,6 +754,20 @@ fn attachment_message(receipt: &AttachmentReceipt) -> String {
         format!(
             "Checkpoint attached to {} and moved out of the Activity Inbox.",
             receipt.attachment.work_item_id
+        )
+    }
+}
+
+fn transition_message(receipt: &WorkItemTransitionReceipt) -> String {
+    if receipt.changed {
+        format!(
+            "{} moved from {} to {}.",
+            receipt.work_item_id, receipt.previous_state, receipt.resulting_state
+        )
+    } else {
+        format!(
+            "{} was already {}.",
+            receipt.work_item_id, receipt.resulting_state
         )
     }
 }

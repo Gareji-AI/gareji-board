@@ -10,7 +10,8 @@ use gareji_board_domain::{
     ActiveWorkAssessment, ActivityTimeline, AttachmentReceipt, AttachmentRequest, AttachmentTarget,
     CheckpointAttachment, CheckpointReconciliation, PortfolioSnapshot, ProjectHealth,
     ProjectSummary, ReconciliationDecision, ReconciliationReceipt, ReconciliationRequest,
-    WorkItemCounts, WorkItemState, WorkItemSummary,
+    WorkItemCounts, WorkItemState, WorkItemSummary, WorkItemTransitionReceipt,
+    WorkItemTransitionRequest,
 };
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params, params_from_iter};
 use thiserror::Error;
@@ -286,6 +287,73 @@ impl SqliteBoardStore {
             });
         }
         Ok(work_items)
+    }
+
+    /// Apply one explicit human Work item transition against observed state.
+    ///
+    /// # Errors
+    ///
+    /// Returns a bounded validation, lookup, concurrent-change, storage, or
+    /// corrupt-state error. Selecting the stored state is a successful no-op.
+    pub fn transition_work_item(
+        &mut self,
+        request: &WorkItemTransitionRequest,
+    ) -> Result<WorkItemTransitionReceipt, StoreError> {
+        validate_id(&request.project_id)?;
+        validate_id(&request.work_item_id)?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(StoreError::Sqlite)?;
+        let stored_state = transaction
+            .query_row(
+                "SELECT w.state
+                 FROM board_projects p
+                 LEFT JOIN board_work_items w
+                   ON w.project_id = p.id AND w.id = ?2
+                 WHERE p.id = ?1",
+                params![request.project_id, request.work_item_id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()
+            .map_err(StoreError::Sqlite)?
+            .ok_or(StoreError::ProjectNotFound)?
+            .ok_or(StoreError::WorkItemNotFound)?;
+        let previous_state = parse_work_item_state(&stored_state)?;
+        if previous_state != request.expected_state {
+            return Err(StoreError::ConcurrentChange);
+        }
+        if previous_state == request.target_state {
+            return Ok(WorkItemTransitionReceipt {
+                work_item_id: request.work_item_id.clone(),
+                previous_state,
+                resulting_state: previous_state,
+                changed: false,
+            });
+        }
+        let changed = transaction
+            .execute(
+                "UPDATE board_work_items
+                 SET state = ?1
+                 WHERE project_id = ?2 AND id = ?3 AND state = ?4",
+                params![
+                    request.target_state.as_str(),
+                    request.project_id,
+                    request.work_item_id,
+                    request.expected_state.as_str()
+                ],
+            )
+            .map_err(StoreError::Sqlite)?;
+        if changed != 1 {
+            return Err(StoreError::ConcurrentChange);
+        }
+        transaction.commit().map_err(StoreError::Sqlite)?;
+        Ok(WorkItemTransitionReceipt {
+            work_item_id: request.work_item_id.clone(),
+            previous_state,
+            resulting_state: request.target_state,
+            changed: true,
+        })
     }
 
     /// Assess one explicit Work item through Board-owned state and project authority.
@@ -854,7 +922,7 @@ pub enum StoreError {
     AlreadyReconciled,
     #[error("the recommended Work item transition requires a separate explicit action")]
     UnsupportedReconciliation,
-    #[error("the Work item changed while reconciliation was being applied")]
+    #[error("the Work item changed before the operation was applied")]
     ConcurrentChange,
     #[error("could not create the Board data directory")]
     CreateDirectory(#[source] std::io::Error),
@@ -881,6 +949,61 @@ mod tests {
         assert_eq!(snapshot.projects.len(), 3);
         assert_eq!(snapshot.active_runs(), 1);
         assert_eq!(snapshot.blocked_items(), 1);
+    }
+
+    #[test]
+    fn explicit_transition_updates_state_and_rejects_stale_observations() {
+        let mut store = SqliteBoardStore::open_in_memory().unwrap();
+        store.seed_sample_if_empty().unwrap();
+        let mut request = WorkItemTransitionRequest {
+            project_id: "gareji-core".to_owned(),
+            work_item_id: "CORE-2".to_owned(),
+            expected_state: WorkItemState::Todo,
+            target_state: WorkItemState::Cancelled,
+        };
+
+        let receipt = store.transition_work_item(&request).unwrap();
+        assert!(receipt.changed);
+        assert_eq!(receipt.previous_state, WorkItemState::Todo);
+        assert_eq!(receipt.resulting_state, WorkItemState::Cancelled);
+
+        request.target_state = WorkItemState::Done;
+        assert!(matches!(
+            store.transition_work_item(&request),
+            Err(StoreError::ConcurrentChange)
+        ));
+
+        request.expected_state = WorkItemState::Cancelled;
+        request.target_state = WorkItemState::Backlog;
+        assert!(store.transition_work_item(&request).unwrap().changed);
+        request.expected_state = WorkItemState::Backlog;
+        let no_change = store.transition_work_item(&request).unwrap();
+        assert!(!no_change.changed);
+        assert_eq!(no_change.resulting_state, WorkItemState::Backlog);
+
+        let stored = store
+            .load_work_items()
+            .unwrap()
+            .into_iter()
+            .find(|work_item| work_item.id == "CORE-2")
+            .unwrap();
+        assert_eq!(stored.state, WorkItemState::Backlog);
+    }
+
+    #[test]
+    fn explicit_transition_hides_cross_project_work_items() {
+        let mut store = SqliteBoardStore::open_in_memory().unwrap();
+        store.seed_sample_if_empty().unwrap();
+
+        assert!(matches!(
+            store.transition_work_item(&WorkItemTransitionRequest {
+                project_id: "gareji-board".to_owned(),
+                work_item_id: "CORE-1".to_owned(),
+                expected_state: WorkItemState::InReview,
+                target_state: WorkItemState::Done,
+            }),
+            Err(StoreError::WorkItemNotFound)
+        ));
     }
 
     #[test]
