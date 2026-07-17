@@ -4,10 +4,10 @@ use std::path::PathBuf;
 use dioxus::prelude::*;
 use gareji_board_core::CoreProgressReader;
 use gareji_board_domain::{
-    ActivityTimeline, AttachmentReceipt, AttachmentRequest, CheckpointDeliveryStatus,
-    CheckpointOutcome, CheckpointReconciliation, PortfolioSnapshot, ProgressActivity,
-    ProjectHealth, ReconciliationDecision, ReconciliationReceipt, ReconciliationRequest,
-    WorkItemState, WorkItemSummary,
+    ActivityTimeline, AttachmentReceipt, AttachmentRequest, AttachmentTarget,
+    CheckpointDeliveryStatus, CheckpointOutcome, CheckpointReconciliation, PortfolioSnapshot,
+    ProgressActivity, ProjectHealth, ReconciliationDecision, ReconciliationReceipt,
+    ReconciliationRequest, WorkItemState, WorkItemSummary,
 };
 use gareji_board_store::{SqliteBoardStore, default_board_database_path};
 
@@ -248,13 +248,31 @@ fn InboxCard(
         .map(|work_item| work_item.id.clone())
         .unwrap_or_default();
     let mut selected = use_signal(move || initial);
+    let suggested_id = suggest_work_item_id(&item.project_id, &candidates);
+    let suggested_title = item.summary.clone();
+    let mut new_work_item_id = use_signal(move || suggested_id);
+    let mut new_work_item_title = use_signal(move || suggested_title);
     let selected_id = selected.read().clone();
+    let new_id = new_work_item_id.read().clone();
+    let new_title = new_work_item_title.read().clone();
     let can_attach = !selected_id.is_empty();
-    let request = AttachmentRequest {
+    let can_create = !new_id.trim().is_empty() && !new_title.trim().is_empty();
+    let existing_request = AttachmentRequest {
         checkpoint_id: item.checkpoint_id.clone(),
         project_id: item.project_id.clone(),
         checkpoint_work_item_id: item.work_item_id.clone(),
-        work_item_id: selected_id.clone(),
+        target: AttachmentTarget::Existing {
+            work_item_id: selected_id.clone(),
+        },
+    };
+    let new_request = AttachmentRequest {
+        checkpoint_id: item.checkpoint_id.clone(),
+        project_id: item.project_id.clone(),
+        checkpoint_work_item_id: item.work_item_id.clone(),
+        target: AttachmentTarget::New {
+            work_item_id: new_id.clone(),
+            title: new_title.clone(),
+        },
     };
     rsx! {
         article { class: "inbox-card",
@@ -272,7 +290,7 @@ fn InboxCard(
             }
             if candidates.is_empty() {
                 p { class: "inbox-unavailable",
-                    "This project has no existing Work items to attach."
+                    "This project has no existing Work items yet."
                 }
             } else {
                 div { class: "attachment-actions",
@@ -291,13 +309,75 @@ fn InboxCard(
                     button {
                         class: "attach-action",
                         disabled: !can_attach,
-                        onclick: move |_| on_attach.call(request.clone()),
+                        onclick: move |_| on_attach.call(existing_request.clone()),
                         "Attach"
                     }
                 }
             }
+            div { class: "inbox-divider", span { "or create a Work item" } }
+            div { class: "creation-actions",
+                label {
+                    span { "Work item ID" }
+                    input {
+                        maxlength: 128,
+                        value: "{new_id}",
+                        oninput: move |event| new_work_item_id.set(event.value()),
+                    }
+                }
+                label { class: "creation-title",
+                    span { "Title" }
+                    input {
+                        maxlength: 256,
+                        value: "{new_title}",
+                        oninput: move |event| new_work_item_title.set(event.value()),
+                    }
+                }
+                button {
+                    class: "create-action",
+                    disabled: !can_create,
+                    onclick: move |_| on_attach.call(new_request.clone()),
+                    "Create & attach"
+                }
+            }
+            p { class: "creation-hint",
+                "The new Work item starts in todo. Suggested state remains yours to review."
+            }
         }
     }
+}
+
+fn suggest_work_item_id(project_id: &str, candidates: &[WorkItemSummary]) -> String {
+    let existing_prefix = candidates.iter().find_map(|work_item| {
+        let (prefix, suffix) = work_item.id.rsplit_once('-')?;
+        suffix.parse::<u32>().ok().map(|_| prefix.to_owned())
+    });
+    let prefix = existing_prefix.unwrap_or_else(|| {
+        let derived = project_id
+            .split(|character: char| !character.is_ascii_alphanumeric())
+            .rfind(|segment| !segment.is_empty())
+            .unwrap_or("WORK")
+            .chars()
+            .take(32)
+            .collect::<String>()
+            .to_ascii_uppercase();
+        if derived.is_empty() {
+            "WORK".to_owned()
+        } else {
+            derived
+        }
+    });
+    let next = candidates
+        .iter()
+        .filter_map(|work_item| {
+            let (candidate_prefix, suffix) = work_item.id.rsplit_once('-')?;
+            (candidate_prefix == prefix)
+                .then(|| suffix.parse::<u32>().ok())
+                .flatten()
+        })
+        .max()
+        .unwrap_or(0)
+        .saturating_add(1);
+    format!("{prefix}-{next}")
 }
 
 #[component]
@@ -498,11 +578,42 @@ fn attachment_message(receipt: &AttachmentReceipt) -> String {
             "Checkpoint was already attached to {}.",
             receipt.attachment.work_item_id
         )
+    } else if receipt.created_work_item {
+        format!(
+            "Created {} in todo, attached the Checkpoint, and moved it out of the Activity Inbox.",
+            receipt.attachment.work_item_id
+        )
     } else {
         format!(
             "Checkpoint attached to {} and moved out of the Activity Inbox.",
             receipt.attachment.work_item_id
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn work_item_id_suggestion_continues_the_project_prefix() {
+        let candidates = vec![
+            WorkItemSummary {
+                id: "CORE-1".to_owned(),
+                project_id: "gareji-core".to_owned(),
+                title: "First".to_owned(),
+                state: WorkItemState::Done,
+            },
+            WorkItemSummary {
+                id: "CORE-4".to_owned(),
+                project_id: "gareji-core".to_owned(),
+                title: "Fourth".to_owned(),
+                state: WorkItemState::Todo,
+            },
+        ];
+
+        assert_eq!(suggest_work_item_id("gareji-core", &candidates), "CORE-5");
+        assert_eq!(suggest_work_item_id("new-project", &[]), "PROJECT-1");
     }
 }
 

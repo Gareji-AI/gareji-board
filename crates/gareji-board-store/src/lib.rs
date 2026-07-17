@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use directories::ProjectDirs;
 use gareji_board_domain::{
-    ActiveWorkAssessment, ActivityTimeline, AttachmentReceipt, AttachmentRequest,
+    ActiveWorkAssessment, ActivityTimeline, AttachmentReceipt, AttachmentRequest, AttachmentTarget,
     CheckpointAttachment, CheckpointReconciliation, PortfolioSnapshot, ProjectHealth,
     ProjectSummary, ReconciliationDecision, ReconciliationReceipt, ReconciliationRequest,
     WorkItemCounts, WorkItemState, WorkItemSummary,
@@ -335,7 +335,7 @@ impl SqliteBoardStore {
         })
     }
 
-    /// Attach one project-only Checkpoint to an existing Work item.
+    /// Attach one project-only Checkpoint to an existing or atomically-created Work item.
     ///
     /// # Errors
     ///
@@ -347,7 +347,11 @@ impl SqliteBoardStore {
     ) -> Result<AttachmentReceipt, StoreError> {
         validate_id(&request.checkpoint_id)?;
         validate_id(&request.project_id)?;
-        validate_id(&request.work_item_id)?;
+        let work_item_id = request.target.work_item_id();
+        validate_id(work_item_id)?;
+        if let AttachmentTarget::New { title, .. } = &request.target {
+            validate_title(title)?;
+        }
         if let Some(work_item_id) = &request.checkpoint_work_item_id {
             validate_id(work_item_id)?;
             return Err(StoreError::CheckpointAlreadyLinked);
@@ -359,50 +363,88 @@ impl SqliteBoardStore {
 
         if let Some(existing) = load_attachment(&transaction, &request.checkpoint_id)? {
             if existing.project_id == request.project_id
-                && existing.attachment.work_item_id == request.work_item_id
+                && existing.attachment.work_item_id == work_item_id
             {
                 return Ok(AttachmentReceipt {
                     checkpoint_id: request.checkpoint_id.clone(),
                     duplicate: true,
+                    created_work_item: false,
                     attachment: existing.attachment,
                 });
             }
             return Err(StoreError::AlreadyAttached);
         }
 
-        transaction
-            .query_row(
-                "SELECT w.id
-                 FROM board_projects p
-                 LEFT JOIN board_work_items w
-                   ON w.project_id = p.id AND w.id = ?2
-                 WHERE p.id = ?1",
-                params![request.project_id, request.work_item_id],
-                |row| row.get::<_, Option<String>>(0),
-            )
-            .optional()
-            .map_err(StoreError::Sqlite)?
-            .ok_or(StoreError::ProjectNotFound)?
-            .ok_or(StoreError::WorkItemNotFound)?;
+        let created_work_item = match &request.target {
+            AttachmentTarget::Existing { .. } => {
+                transaction
+                    .query_row(
+                        "SELECT w.id
+                         FROM board_projects p
+                         LEFT JOIN board_work_items w
+                           ON w.project_id = p.id AND w.id = ?2
+                         WHERE p.id = ?1",
+                        params![request.project_id, work_item_id],
+                        |row| row.get::<_, Option<String>>(0),
+                    )
+                    .optional()
+                    .map_err(StoreError::Sqlite)?
+                    .ok_or(StoreError::ProjectNotFound)?
+                    .ok_or(StoreError::WorkItemNotFound)?;
+                false
+            }
+            AttachmentTarget::New { title, .. } => {
+                transaction
+                    .query_row(
+                        "SELECT 1 FROM board_projects WHERE id = ?1",
+                        [&request.project_id],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .optional()
+                    .map_err(StoreError::Sqlite)?
+                    .ok_or(StoreError::ProjectNotFound)?;
+                let existing = transaction
+                    .query_row(
+                        "SELECT 1 FROM board_work_items WHERE id = ?1",
+                        [work_item_id],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .optional()
+                    .map_err(StoreError::Sqlite)?;
+                if existing.is_some() {
+                    return Err(StoreError::WorkItemAlreadyExists);
+                }
+                transaction
+                    .execute(
+                        "INSERT INTO board_work_items (id, project_id, title, state)
+                         VALUES (?1, ?2, ?3, ?4)",
+                        params![
+                            work_item_id,
+                            request.project_id,
+                            title.trim(),
+                            WorkItemState::Todo.as_str()
+                        ],
+                    )
+                    .map_err(StoreError::Sqlite)?;
+                true
+            }
+        };
 
         transaction
             .execute(
                 "INSERT INTO board_checkpoint_attachments (
                    checkpoint_id, project_id, work_item_id
                  ) VALUES (?1, ?2, ?3)",
-                params![
-                    request.checkpoint_id,
-                    request.project_id,
-                    request.work_item_id
-                ],
+                params![request.checkpoint_id, request.project_id, work_item_id],
             )
             .map_err(StoreError::Sqlite)?;
         transaction.commit().map_err(StoreError::Sqlite)?;
         Ok(AttachmentReceipt {
             checkpoint_id: request.checkpoint_id.clone(),
             duplicate: false,
+            created_work_item,
             attachment: CheckpointAttachment {
-                work_item_id: request.work_item_id.clone(),
+                work_item_id: work_item_id.to_owned(),
             },
         })
     }
@@ -786,6 +828,14 @@ fn validate_id(value: &str) -> Result<(), StoreError> {
     Ok(())
 }
 
+fn validate_title(value: &str) -> Result<(), StoreError> {
+    let length = value.trim().chars().count();
+    if length == 0 || length > 256 {
+        return Err(StoreError::InvalidRequest);
+    }
+    Ok(())
+}
+
 #[derive(Debug, Error)]
 pub enum StoreError {
     #[error("request did not satisfy the Board contract")]
@@ -794,6 +844,8 @@ pub enum StoreError {
     ProjectNotFound,
     #[error("Work item was not found in the requested project")]
     WorkItemNotFound,
+    #[error("a Work item with this ID already exists")]
+    WorkItemAlreadyExists,
     #[error("this Checkpoint already has a Work item link")]
     CheckpointAlreadyLinked,
     #[error("this Checkpoint is already attached to another Work item")]
@@ -977,11 +1029,14 @@ mod tests {
             checkpoint_id: "cp-inbox".to_owned(),
             project_id: "gareji-core".to_owned(),
             checkpoint_work_item_id: None,
-            work_item_id: "CORE-2".to_owned(),
+            target: AttachmentTarget::Existing {
+                work_item_id: "CORE-2".to_owned(),
+            },
         };
 
         let receipt = store.attach_checkpoint(&request).unwrap();
         assert!(!receipt.duplicate);
+        assert!(!receipt.created_work_item);
         assert_eq!(receipt.attachment.work_item_id, "CORE-2");
         assert!(store.attach_checkpoint(&request).unwrap().duplicate);
 
@@ -999,6 +1054,85 @@ mod tests {
     }
 
     #[test]
+    fn new_work_item_is_created_and_attached_atomically() {
+        let mut store = SqliteBoardStore::open_in_memory().unwrap();
+        store.seed_sample_if_empty().unwrap();
+        let request = AttachmentRequest {
+            checkpoint_id: "cp-new-work".to_owned(),
+            project_id: "gareji-core".to_owned(),
+            checkpoint_work_item_id: None,
+            target: AttachmentTarget::New {
+                work_item_id: "CORE-3".to_owned(),
+                title: "Capture Activity Inbox follow-up".to_owned(),
+            },
+        };
+
+        let receipt = store.attach_checkpoint(&request).unwrap();
+        assert!(!receipt.duplicate);
+        assert!(receipt.created_work_item);
+        assert_eq!(receipt.attachment.work_item_id, "CORE-3");
+
+        let work_item = store
+            .load_work_items()
+            .unwrap()
+            .into_iter()
+            .find(|work_item| work_item.id == "CORE-3")
+            .unwrap();
+        assert_eq!(work_item.project_id, "gareji-core");
+        assert_eq!(work_item.title, "Capture Activity Inbox follow-up");
+        assert_eq!(work_item.state, WorkItemState::Todo);
+
+        let duplicate = store.attach_checkpoint(&request).unwrap();
+        assert!(duplicate.duplicate);
+        assert!(!duplicate.created_work_item);
+        assert_eq!(
+            store
+                .load_work_items()
+                .unwrap()
+                .iter()
+                .filter(|work_item| work_item.id == "CORE-3")
+                .count(),
+            1
+        );
+
+        let mut timeline = ActivityTimeline {
+            activities: vec![activity("cp-new-work", "gareji-core", None, None)],
+            has_older: false,
+        };
+        store.hydrate_activity(&mut timeline).unwrap();
+        assert_eq!(timeline.inbox_count(), 0);
+        assert_eq!(
+            timeline.activities[0].effective_work_item_id(),
+            Some("CORE-3")
+        );
+    }
+
+    #[test]
+    fn failed_work_item_creation_leaves_checkpoint_available_for_attachment() {
+        let mut store = SqliteBoardStore::open_in_memory().unwrap();
+        store.seed_sample_if_empty().unwrap();
+        let mut request = AttachmentRequest {
+            checkpoint_id: "cp-atomic".to_owned(),
+            project_id: "gareji-core".to_owned(),
+            checkpoint_work_item_id: None,
+            target: AttachmentTarget::New {
+                work_item_id: "CORE-1".to_owned(),
+                title: "Conflicting identity".to_owned(),
+            },
+        };
+
+        assert!(matches!(
+            store.attach_checkpoint(&request),
+            Err(StoreError::WorkItemAlreadyExists)
+        ));
+
+        request.target = AttachmentTarget::Existing {
+            work_item_id: "CORE-2".to_owned(),
+        };
+        assert!(store.attach_checkpoint(&request).is_ok());
+    }
+
+    #[test]
     fn attachment_is_final_and_rejects_linked_or_cross_project_activity() {
         let mut store = SqliteBoardStore::open_in_memory().unwrap();
         store.seed_sample_if_empty().unwrap();
@@ -1006,11 +1140,15 @@ mod tests {
             checkpoint_id: "cp-final".to_owned(),
             project_id: "gareji-core".to_owned(),
             checkpoint_work_item_id: None,
-            work_item_id: "CORE-1".to_owned(),
+            target: AttachmentTarget::Existing {
+                work_item_id: "CORE-1".to_owned(),
+            },
         };
         store.attach_checkpoint(&request).unwrap();
 
-        request.work_item_id = "CORE-2".to_owned();
+        request.target = AttachmentTarget::Existing {
+            work_item_id: "CORE-2".to_owned(),
+        };
         assert!(matches!(
             store.attach_checkpoint(&request),
             Err(StoreError::AlreadyAttached)
@@ -1041,7 +1179,9 @@ mod tests {
                 checkpoint_id: "cp-attached-review".to_owned(),
                 project_id: "gareji-core".to_owned(),
                 checkpoint_work_item_id: None,
-                work_item_id: "CORE-2".to_owned(),
+                target: AttachmentTarget::Existing {
+                    work_item_id: "CORE-2".to_owned(),
+                },
             })
             .unwrap();
         store
@@ -1113,7 +1253,9 @@ mod tests {
                 checkpoint_id: "cp-v2".to_owned(),
                 project_id: "core".to_owned(),
                 checkpoint_work_item_id: None,
-                work_item_id: "CORE-1".to_owned(),
+                target: AttachmentTarget::Existing {
+                    work_item_id: "CORE-1".to_owned(),
+                },
             })
             .unwrap();
         assert_eq!(receipt.attachment.work_item_id, "CORE-1");

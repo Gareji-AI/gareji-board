@@ -42,6 +42,15 @@ button, input, select { font: inherit; }
 .attachment-actions select { width: 100%; min-width: 0; padding: 9px 10px; border: 1px solid #554b3b; border-radius: 8px; color: #ece8df; background: #181d1a; }
 .attach-action { padding: 9px 13px; border: 1px solid #8c7041; border-radius: 8px; color: #ffe0aa; background: #3a2b17; cursor: pointer; font-size: 11px; font-weight: 750; }
 .attach-action:disabled { opacity: .5; cursor: not-allowed; }
+.inbox-divider { display: flex; align-items: center; gap: 10px; margin: 16px 0 12px; color: #8f826d; font-size: 10px; text-transform: uppercase; letter-spacing: .09em; }
+.inbox-divider::before, .inbox-divider::after { content: ""; height: 1px; flex: 1; background: #493e2d; }
+.creation-actions { display: grid; grid-template-columns: minmax(110px, .6fr) minmax(180px, 1.4fr) auto; align-items: end; gap: 10px; }
+.creation-actions label { min-width: 0; display: grid; gap: 7px; color: #b8ab96; font-size: 11px; }
+.creation-actions input { width: 100%; min-width: 0; padding: 9px 10px; border: 1px solid #554b3b; border-radius: 8px; color: #ece8df; background: #181d1a; }
+.creation-actions input:focus { outline: 1px solid #8c7041; border-color: #8c7041; }
+.create-action { padding: 9px 13px; border: 1px solid #397b55; border-radius: 8px; color: #a3efc1; background: #173625; cursor: pointer; font-size: 11px; font-weight: 750; white-space: nowrap; }
+.create-action:disabled { opacity: .5; cursor: not-allowed; }
+.creation-hint { margin: 9px 0 0; color: #8f9b95; font-size: 10px; line-height: 1.5; }
 .attachment-label { color: #aa9b83; }
 .timeline { position: relative; display: grid; gap: 12px; }
 .timeline::before { content: ""; position: absolute; top: 18px; bottom: 18px; left: 6px; width: 1px; background: #34413c; }
@@ -110,4 +119,5 @@ button, input, select { font: inherit; }
   .project-grid { grid-template-columns: 1fr; }
   .reconciliation-actions { align-items: flex-start; flex-direction: column; }
   .attachment-actions { align-items: stretch; flex-direction: column; }
+  .creation-actions { grid-template-columns: 1fr; align-items: stretch; }
 }

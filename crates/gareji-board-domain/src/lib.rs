@@ -348,7 +348,24 @@ pub struct AttachmentRequest {
     pub checkpoint_id: String,
     pub project_id: String,
     pub checkpoint_work_item_id: Option<String>,
-    pub work_item_id: String,
+    pub target: AttachmentTarget,
+}
+
+/// Human-selected destination for one Activity Inbox Checkpoint.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum AttachmentTarget {
+    Existing { work_item_id: String },
+    New { work_item_id: String, title: String },
+}
+
+impl AttachmentTarget {
+    /// Return the stable Work item identity used by the final attachment.
+    #[must_use]
+    pub fn work_item_id(&self) -> &str {
+        match self {
+            Self::Existing { work_item_id } | Self::New { work_item_id, .. } => work_item_id,
+        }
+    }
 }
 
 /// Durable result from one Checkpoint attachment attempt.
@@ -356,6 +373,7 @@ pub struct AttachmentRequest {
 pub struct AttachmentReceipt {
     pub checkpoint_id: String,
     pub duplicate: bool,
+    pub created_work_item: bool,
     pub attachment: CheckpointAttachment,
 }
 
