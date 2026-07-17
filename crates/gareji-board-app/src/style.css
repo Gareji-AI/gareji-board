@@ -235,6 +235,14 @@ button, input, select { font: inherit; }
 .execution-workspace-connection > div { display: grid; gap: 3px; }
 .execution-workspace-connection > div span, .execution-workspace-connection label > span { color: #77887f; font-size: 9px; text-transform: uppercase; letter-spacing: .07em; }
 .execution-workspace-connection strong { color: #b8e6c9; font-size: 10px; overflow-wrap: anywhere; }
+.workspace-connection-details { display: grid; gap: 5px; margin: 0; }
+.workspace-connection-details > div { display: grid; grid-template-columns: 68px minmax(0, 1fr); gap: 7px; align-items: start; }
+.workspace-connection-details dt { color: #74827a; font-size: 8px; text-transform: uppercase; letter-spacing: .07em; }
+.workspace-connection-details dd { min-width: 0; margin: 0; color: #b5c3bc; font-size: 9px; line-height: 1.35; overflow-wrap: anywhere; }
+.workspace-state { justify-self: start; padding: 3px 5px; border-radius: 999px; font-weight: 750; }
+.workspace-state-sample { color: #aeb9b4; background: #29312e; }
+.workspace-state-available { color: #98e3b9; background: #183523; }
+.workspace-state-unavailable { color: #ffc98f; background: #3a2d15; }
 .execution-workspace-connection label { display: grid; gap: 5px; }
 .execution-workspace-connection input { width: 100%; min-width: 0; box-sizing: border-box; padding: 8px 9px; border: 1px solid #3b5146; border-radius: 7px; color: #e8eee9; background: #151b18; font-size: 10px; }
 .workspace-connect-action { justify-self: start; padding: 7px 10px; border: 1px solid #37694c; border-radius: 7px; color: #b9f0cf; background: #183523; cursor: pointer; font-size: 10px; font-weight: 750; }

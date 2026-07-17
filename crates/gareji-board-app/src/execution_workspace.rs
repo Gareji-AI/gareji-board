@@ -1,10 +1,25 @@
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use gareji_board_domain::{ExecutionWorkspaceConnection, ExecutionWorkspaceKind};
 
 /// UI-facing connection seam for existing local Execution workspaces.
 pub struct ExecutionWorkspaceConnector;
+
+/// Read-only local facts currently observable for one workspace connection.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExecutionWorkspaceInspection {
+    pub availability: WorkspaceAvailability,
+    pub repository_root: Option<String>,
+}
+
+/// Availability is separate from Runner eligibility and execution authority.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WorkspaceAvailability {
+    BundledSample,
+    Available,
+    Unavailable,
+}
 
 impl ExecutionWorkspaceConnector {
     /// Resolve one existing directory into the local Board connection shape.
@@ -36,6 +51,54 @@ impl ExecutionWorkspaceConnector {
             location: Some(location),
         })
     }
+
+    /// Inspect a stored connection without reading workspace contents or Git state.
+    #[must_use]
+    pub fn inspect_connection(
+        connection: Option<&ExecutionWorkspaceConnection>,
+    ) -> ExecutionWorkspaceInspection {
+        let Some(connection) = connection else {
+            return unavailable_inspection();
+        };
+        match (connection.kind, connection.location.as_deref()) {
+            (ExecutionWorkspaceKind::BundledSample, None) => ExecutionWorkspaceInspection {
+                availability: WorkspaceAvailability::BundledSample,
+                repository_root: None,
+            },
+            (ExecutionWorkspaceKind::LocalDirectory, Some(location)) => {
+                inspect_local_directory(Path::new(location))
+            }
+            _ => unavailable_inspection(),
+        }
+    }
+}
+
+fn inspect_local_directory(location: &Path) -> ExecutionWorkspaceInspection {
+    let canonical = fs::canonicalize(location)
+        .ok()
+        .filter(|candidate| candidate.is_dir());
+    let Some(canonical) = canonical else {
+        return unavailable_inspection();
+    };
+    ExecutionWorkspaceInspection {
+        availability: WorkspaceAvailability::Available,
+        repository_root: nearest_git_root(&canonical)
+            .and_then(|root| displayable_canonical_path(&root)),
+    }
+}
+
+fn unavailable_inspection() -> ExecutionWorkspaceInspection {
+    ExecutionWorkspaceInspection {
+        availability: WorkspaceAvailability::Unavailable,
+        repository_root: None,
+    }
+}
+
+fn nearest_git_root(start: &Path) -> Option<PathBuf> {
+    start.ancestors().find_map(|candidate| {
+        let marker = candidate.join(".git");
+        (marker.is_dir() || marker.is_file()).then(|| candidate.to_path_buf())
+    })
 }
 
 fn displayable_canonical_path(path: &Path) -> Option<String> {
@@ -96,6 +159,32 @@ mod tests {
             )
             .is_err()
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn inspection_reports_availability_and_the_nearest_git_root() {
+        let root = temporary_directory("workspace-inspection");
+        let repository = root.join("repository");
+        let nested = repository.join("nested/project");
+        fs::create_dir_all(&nested).unwrap();
+        fs::create_dir(repository.join(".git")).unwrap();
+        let connection = ExecutionWorkspaceConnection {
+            project_id: "gareji-board".to_owned(),
+            kind: ExecutionWorkspaceKind::LocalDirectory,
+            location: Some(nested.display().to_string()),
+        };
+
+        let inspection = ExecutionWorkspaceConnector::inspect_connection(Some(&connection));
+        assert_eq!(inspection.availability, WorkspaceAvailability::Available);
+        assert_eq!(
+            inspection.repository_root.as_deref(),
+            displayable_canonical_path(&fs::canonicalize(repository).unwrap()).as_deref()
+        );
+
+        let unavailable = ExecutionWorkspaceConnector::inspect_connection(None);
+        assert_eq!(unavailable.availability, WorkspaceAvailability::Unavailable);
+        assert_eq!(unavailable.repository_root, None);
         fs::remove_dir_all(root).unwrap();
     }
 

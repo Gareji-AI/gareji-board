@@ -23,7 +23,9 @@ use agent_behavior::{
     AgentBehaviorInspection, AgentBehaviorInspector, BehaviorInspectionStatus, ReferenceInspection,
     ReferenceStatus,
 };
-use execution_workspace::ExecutionWorkspaceConnector;
+use execution_workspace::{
+    ExecutionWorkspaceConnector, ExecutionWorkspaceInspection, WorkspaceAvailability,
+};
 
 const APP_CSS: &str = include_str!("style.css");
 const PREVIEW_GLOBAL_CONCURRENCY_CAP: u32 = 2;
@@ -2002,6 +2004,33 @@ fn execution_workspace_label(connection: Option<&ExecutionWorkspaceConnection>) 
     }
 }
 
+fn workspace_availability_label(availability: WorkspaceAvailability) -> &'static str {
+    match availability {
+        WorkspaceAvailability::BundledSample => "Bundled fixture",
+        WorkspaceAvailability::Available => "Available",
+        WorkspaceAvailability::Unavailable => "Unavailable",
+    }
+}
+
+fn workspace_availability_class(availability: WorkspaceAvailability) -> &'static str {
+    match availability {
+        WorkspaceAvailability::BundledSample => "workspace-state workspace-state-sample",
+        WorkspaceAvailability::Available => "workspace-state workspace-state-available",
+        WorkspaceAvailability::Unavailable => "workspace-state workspace-state-unavailable",
+    }
+}
+
+fn workspace_repository_label(inspection: &ExecutionWorkspaceInspection) -> String {
+    if let Some(root) = &inspection.repository_root {
+        return format!("Git root · {root}");
+    }
+    match inspection.availability {
+        WorkspaceAvailability::BundledSample => "Bundled fixture".to_owned(),
+        WorkspaceAvailability::Available => "No Git repository detected".to_owned(),
+        WorkspaceAvailability::Unavailable => "Not checked while unavailable".to_owned(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2200,6 +2229,11 @@ fn ProjectCard(
     let mut workspace_location = use_signal(move || initial_location);
     let workspace_location_value = workspace_location.read().clone();
     let connection_label = execution_workspace_label(execution_workspace.as_ref());
+    let workspace_inspection =
+        ExecutionWorkspaceConnector::inspect_connection(execution_workspace.as_ref());
+    let availability_label = workspace_availability_label(workspace_inspection.availability);
+    let availability_class = workspace_availability_class(workspace_inspection.availability);
+    let repository_label = workspace_repository_label(&workspace_inspection);
     let can_connect = !workspace_location_value.trim().is_empty();
     let project_id = project.id.clone();
     let expected = execution_workspace.clone();
@@ -2222,6 +2256,16 @@ fn ProjectCard(
                 div {
                     span { "Execution workspace" }
                     strong { "{connection_label}" }
+                }
+                dl { class: "workspace-connection-details",
+                    div {
+                        dt { "Connection" }
+                        dd { class: "{availability_class}", "{availability_label}" }
+                    }
+                    div {
+                        dt { "Repository" }
+                        dd { "{repository_label}" }
+                    }
                 }
                 label {
                     span { "Connect existing local directory" }
