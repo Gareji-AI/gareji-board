@@ -1385,9 +1385,12 @@ fn WorkItemControl(
     new_work_item_priority: Signal<String>,
     on_create: EventHandler<WorkItemCreateRequest>,
 ) -> Element {
-    let work_item_count = work_items.len();
+    let mut project_filter = use_signal(String::new);
+    let project_filter_value = project_filter.read().clone();
+    let visible_work_items = filter_work_items_by_project(&work_items, &project_filter_value);
+    let work_item_count = visible_work_items.len();
     let capability_catalog = agent_capability_catalog(&agent_profiles, &work_items);
-    let lanes = group_work_items_by_state(work_items.clone());
+    let lanes = group_work_items_by_state(visible_work_items);
     rsx! {
         section { class: "section-heading",
             div {
@@ -1395,6 +1398,26 @@ fn WorkItemControl(
                 h3 { "Work item Kanban" }
             }
             span { "{work_item_count} total" }
+        }
+
+        div { class: "kanban-filter",
+            label {
+                span { "Show" }
+                select {
+                    aria_label: "Kanban project filter",
+                    value: "{project_filter_value}",
+                    onchange: move |event| project_filter.set(event.value()),
+                    option { value: "", "All projects" }
+                    for project in &portfolio.projects {
+                        option {
+                            value: "{project.id}",
+                            selected: project_filter_value == project.id,
+                            "{project.name} · {project.id}"
+                        }
+                    }
+                }
+            }
+            small { "Filters this Kanban view only; Work item state is unchanged." }
         }
 
         NewWorkItemForm {
@@ -1409,7 +1432,7 @@ fn WorkItemControl(
 
         if work_item_count == 0 {
             section { class: "empty-work-items",
-                strong { "No Work items yet" }
+                strong { "No Work items in this view" }
                 p { "Add a direct Work item or create one from an Activity Inbox Checkpoint." }
             }
         } else {
@@ -2076,6 +2099,17 @@ fn agent_capability_catalog(
     capabilities
 }
 
+fn filter_work_items_by_project(
+    work_items: &[WorkItemSummary],
+    project_id: &str,
+) -> Vec<WorkItemSummary> {
+    work_items
+        .iter()
+        .filter(|work_item| project_id.is_empty() || work_item.project_id == project_id)
+        .cloned()
+        .collect()
+}
+
 fn group_work_items_by_state(
     work_items: Vec<WorkItemSummary>,
 ) -> Vec<(WorkItemState, Vec<WorkItemSummary>)> {
@@ -2525,6 +2559,40 @@ mod tests {
             "BOARD-2"
         );
         assert_eq!(lanes.iter().map(|(_, items)| items.len()).sum::<usize>(), 2);
+    }
+
+    #[test]
+    fn kanban_filter_keeps_only_the_selected_project_without_mutating_items() {
+        let work_items = vec![
+            WorkItemSummary {
+                id: "BOARD-1".to_owned(),
+                project_id: "gareji-board".to_owned(),
+                title: "Board work".to_owned(),
+                priority: 1,
+                state: WorkItemState::Todo,
+                approval_requirement: ApprovalRequirement::None,
+                dependency_ids: Vec::new(),
+                agent_profile_id: None,
+                required_capabilities: Vec::new(),
+            },
+            WorkItemSummary {
+                id: "CORE-1".to_owned(),
+                project_id: "gareji-core".to_owned(),
+                title: "Core work".to_owned(),
+                priority: 1,
+                state: WorkItemState::Todo,
+                approval_requirement: ApprovalRequirement::None,
+                dependency_ids: Vec::new(),
+                agent_profile_id: None,
+                required_capabilities: Vec::new(),
+            },
+        ];
+
+        assert_eq!(filter_work_items_by_project(&work_items, "").len(), 2);
+        let filtered = filter_work_items_by_project(&work_items, "gareji-core");
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].id, "CORE-1");
+        assert_eq!(work_items.len(), 2);
     }
 }
 

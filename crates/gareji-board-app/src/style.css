@@ -162,6 +162,10 @@ button, input, select { font: inherit; }
 .agent-profile-action { align-self: end; padding: 9px 13px; border: 1px solid #37694c; border-radius: 8px; color: #b9f0cf; background: #183523; cursor: pointer; font-size: 11px; font-weight: 750; }
 .agent-profile-action:disabled { opacity: .45; cursor: not-allowed; }
 .agent-catalog-hint { margin: 0; color: #78867f; font-size: 10px; line-height: 1.5; }
+.kanban-filter { display: flex; flex-wrap: wrap; align-items: end; gap: 10px; margin: -4px 0 16px; padding: 10px 12px; border: 1px solid #30443a; border-radius: 9px; background: rgba(18, 31, 24, .5); }
+.kanban-filter label { display: grid; gap: 5px; min-width: min(100%, 290px); color: #8f9b95; font-size: 10px; }
+.kanban-filter select { padding: 8px 9px; border: 1px solid #3b5146; border-radius: 7px; color: #e8eee9; background: #151b18; font-size: 10px; }
+.kanban-filter small { color: #78867f; font-size: 9px; line-height: 1.4; }
 .kanban-board { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(270px, 300px); align-items: start; gap: 14px; padding: 2px 2px 14px; overflow-x: auto; overscroll-behavior-inline: contain; scroll-snap-type: inline proximity; scrollbar-color: #43534c #171d1a; }
 .kanban-lane { --lane-accent: #8f9b95; min-width: 0; height: clamp(360px, 62vh, 620px); display: flex; flex-direction: column; padding: 16px 12px 12px; border: 1px solid #2b3531; border-top: 2px solid var(--lane-accent); border-radius: 12px; background: rgba(17, 23, 20, .82); scroll-snap-align: start; }
 .lane-backlog { --lane-accent: #89938e; }
