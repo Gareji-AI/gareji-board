@@ -219,6 +219,14 @@ button, input, select { font: inherit; }
 .transition-action:disabled { opacity: .45; cursor: not-allowed; }
 .empty-work-items { padding: 22px; border: 1px dashed #35413c; border-radius: 12px; background: rgba(18, 24, 21, .55); }
 .empty-work-items p { margin: 6px 0 0; color: #839089; font-size: 12px; }
+.new-project { margin: 0 0 16px; border: 1px solid #30443a; border-radius: 12px; background: rgba(18, 31, 24, .5); }
+.new-project summary { padding: 13px 15px; color: #b9f0cf; cursor: pointer; font-size: 12px; font-weight: 750; }
+.project-form { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; padding: 3px 15px 15px; border-top: 1px solid #30443a; }
+.project-form label { display: grid; gap: 6px; padding-top: 10px; color: #8f9b95; font-size: 10px; }
+.project-form input { width: 100%; min-width: 0; box-sizing: border-box; padding: 9px 10px; border: 1px solid #3c4943; border-radius: 8px; color: #ece8df; background: #181d1a; }
+.project-form small { color: #74827a; font-size: 9px; line-height: 1.4; }
+.project-create-action { justify-self: start; align-self: end; padding: 9px 13px; border: 1px solid #37694c; border-radius: 8px; color: #b9f0cf; background: #183523; cursor: pointer; font-size: 11px; font-weight: 750; }
+.project-create-action:disabled { opacity: .45; cursor: not-allowed; }
 .project-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
 .project-card { min-height: 354px; display: flex; flex-direction: column; padding: 22px; border: 1px solid #2b3531; border-radius: 14px; background: linear-gradient(150deg, rgba(28, 36, 32, .98), rgba(16, 21, 19, .98)); box-shadow: 0 16px 42px rgba(0,0,0,.16); }
 .project-head { display: flex; justify-content: space-between; gap: 16px; align-items: flex-start; }
@@ -283,6 +291,7 @@ button, input, select { font: inherit; }
   .creation-actions { grid-template-columns: 1fr; align-items: stretch; }
   .agent-profile-grid { grid-template-columns: 1fr; }
   .agent-profile-form { grid-template-columns: 1fr; }
+  .project-form { grid-template-columns: 1fr; }
   .behavior-inspection-source { grid-template-columns: 1fr; }
   .behavior-inspection-source small { grid-column: auto; }
   .kanban-board { grid-auto-columns: minmax(258px, calc(100vw - 64px)); }

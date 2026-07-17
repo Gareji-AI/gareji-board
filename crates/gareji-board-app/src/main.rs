@@ -10,9 +10,9 @@ use gareji_board_domain::{
     CandidateSkipReason, CheckpointDeliveryStatus, CheckpointOutcome, CheckpointReconciliation,
     ExecutionWorkspaceConnection, ExecutionWorkspaceKind, ExecutionWorkspaceSaveReceipt,
     ExecutionWorkspaceSaveRequest, NoCandidateReason, PortfolioSnapshot, ProgressActivity,
-    ProjectHealth, ReconciliationDecision, ReconciliationReceipt, ReconciliationRequest,
-    SafeAutopilotOutcome, SafeAutopilotPreview, WorkItemState, WorkItemSummary,
-    WorkItemTransitionReceipt, WorkItemTransitionRequest,
+    ProjectCreateReceipt, ProjectCreateRequest, ProjectHealth, ReconciliationDecision,
+    ReconciliationReceipt, ReconciliationRequest, SafeAutopilotOutcome, SafeAutopilotPreview,
+    WorkItemState, WorkItemSummary, WorkItemTransitionReceipt, WorkItemTransitionRequest,
 };
 use gareji_board_store::{SqliteBoardStore, default_board_database_path};
 
@@ -59,6 +59,7 @@ struct AppState {
     agent_plan_notice: Option<String>,
     agent_profile_notice: Option<String>,
     execution_workspace_notice: Option<String>,
+    project_notice: Option<String>,
     autopilot_preview: Option<SafeAutopilotPreview>,
 }
 
@@ -71,6 +72,14 @@ struct NewAgentProfileSignals {
     skill_refs: Signal<String>,
 }
 
+#[derive(Clone, Copy)]
+struct NewProjectSignals {
+    project_id: Signal<String>,
+    name: Signal<String>,
+    execution_cap: Signal<String>,
+    workspace_location: Signal<String>,
+}
+
 fn use_new_agent_profile_signals() -> NewAgentProfileSignals {
     NewAgentProfileSignals {
         profile_id: use_signal(String::new),
@@ -78,6 +87,15 @@ fn use_new_agent_profile_signals() -> NewAgentProfileSignals {
         capabilities: use_signal(String::new),
         instruction_ref: use_signal(String::new),
         skill_refs: use_signal(String::new),
+    }
+}
+
+fn use_new_project_signals() -> NewProjectSignals {
+    NewProjectSignals {
+        project_id: use_signal(String::new),
+        name: use_signal(String::new),
+        execution_cap: use_signal(|| "1".to_owned()),
+        workspace_location: use_signal(String::new),
     }
 }
 
@@ -138,6 +156,7 @@ fn load_app_state() -> AppState {
                 agent_plan_notice: None,
                 agent_profile_notice: None,
                 execution_workspace_notice: None,
+                project_notice: None,
                 autopilot_preview: None,
             }
         }
@@ -156,6 +175,7 @@ fn load_app_state() -> AppState {
             agent_plan_notice: None,
             agent_profile_notice: None,
             execution_workspace_notice: None,
+            project_notice: None,
             autopilot_preview: None,
         },
     }
@@ -206,6 +226,12 @@ fn save_execution_workspace(
 ) -> Result<ExecutionWorkspaceSaveReceipt, String> {
     SqliteBoardStore::open(board_database_path())
         .and_then(|mut store| store.save_execution_workspace(request))
+        .map_err(|error| error.to_string())
+}
+
+fn create_project(request: &ProjectCreateRequest) -> Result<ProjectCreateReceipt, String> {
+    SqliteBoardStore::open(board_database_path())
+        .and_then(|mut store| store.create_project(request))
         .map_err(|error| error.to_string())
 }
 
@@ -302,10 +328,39 @@ fn handle_execution_workspace_connection(
     }
 }
 
+fn handle_project_creation(
+    mut state: Signal<AppState>,
+    mut form: NewProjectSignals,
+    request: (String, String, u32, String),
+) {
+    let (project_id, name, execution_cap, location) = request;
+    match ExecutionWorkspaceConnector::connect_local_directory(&project_id, &location) {
+        Ok(execution_workspace) => match create_project(&ProjectCreateRequest {
+            id: project_id,
+            name,
+            execution_cap,
+            execution_workspace,
+        }) {
+            Ok(receipt) => {
+                form.project_id.set(String::new());
+                form.name.set(String::new());
+                form.execution_cap.set("1".to_owned());
+                form.workspace_location.set(String::new());
+                let mut reloaded = load_app_state();
+                reloaded.project_notice = Some(project_message(&receipt));
+                state.set(reloaded);
+            }
+            Err(error) => state.write().project_notice = Some(error),
+        },
+        Err(error) => state.write().project_notice = Some(error),
+    }
+}
+
 #[allow(non_snake_case)]
 fn App() -> Element {
     let mut state = use_signal(load_app_state);
     let new_profile_form = use_new_agent_profile_signals();
+    let new_project_form = use_new_project_signals();
     let snapshot = state.read().clone();
     let project_count = snapshot.portfolio.projects.len();
     let active_runs = snapshot.portfolio.active_runs();
@@ -329,6 +384,9 @@ fn App() -> Element {
     let on_agent_profile = move |request| handle_agent_profile(state, new_profile_form, &request);
     let on_execution_workspace = move |(project_id, expected, location)| {
         handle_execution_workspace_connection(state, (project_id, expected, location));
+    };
+    let on_project_create = move |request| {
+        handle_project_creation(state, new_project_form, request);
     };
     let action_notices = action_notices(&snapshot);
 
@@ -399,6 +457,11 @@ fn App() -> Element {
                 portfolio: snapshot.portfolio.clone(),
                 execution_workspaces: snapshot.execution_workspaces.clone(),
                 on_connect: on_execution_workspace,
+                new_project_id: new_project_form.project_id,
+                new_project_name: new_project_form.name,
+                new_project_execution_cap: new_project_form.execution_cap,
+                new_project_workspace_location: new_project_form.workspace_location,
+                on_create: on_project_create,
             }
 
             footer { class: "app-footer",
@@ -426,6 +489,7 @@ fn action_notices(snapshot: &AppState) -> Vec<String> {
         snapshot.agent_plan_notice.clone(),
         snapshot.agent_profile_notice.clone(),
         snapshot.execution_workspace_notice.clone(),
+        snapshot.project_notice.clone(),
     ]
     .into_iter()
     .flatten()
@@ -1765,6 +1829,10 @@ fn skill_ref_input_is_valid(value: &str) -> bool {
 }
 
 fn agent_profile_id_is_valid(value: &str) -> bool {
+    project_id_is_valid(value)
+}
+
+fn project_id_is_valid(value: &str) -> bool {
     let length = value.chars().count();
     let mut characters = value.chars();
     let Some(first) = characters.next() else {
@@ -1779,6 +1847,15 @@ fn agent_profile_id_is_valid(value: &str) -> bool {
                 || character.is_ascii_digit()
                 || matches!(character, '-' | '_')
         })
+}
+
+fn project_name_is_valid(value: &str) -> bool {
+    let trimmed = value.trim();
+    !trimmed.is_empty() && trimmed == value && trimmed.chars().count() <= 256
+}
+
+fn parse_project_execution_cap(value: &str) -> Option<u32> {
+    value.trim().parse::<u32>().ok().filter(|value| *value > 0)
 }
 
 fn agent_role_is_valid(value: &str) -> bool {
@@ -1989,6 +2066,14 @@ fn execution_workspace_message(receipt: &ExecutionWorkspaceSaveReceipt) -> Strin
     )
 }
 
+fn project_message(receipt: &ProjectCreateReceipt) -> String {
+    format!(
+        "Project {} added with {}. It is idle until you add Work items.",
+        receipt.project.id,
+        execution_workspace_label(Some(&receipt.execution_workspace))
+    )
+}
+
 fn execution_workspace_label(connection: Option<&ExecutionWorkspaceConnection>) -> String {
     match connection {
         Some(ExecutionWorkspaceConnection {
@@ -2070,6 +2155,17 @@ fn workspace_skill_discovery_note(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn project_form_requires_a_stable_identity_trimmed_name_and_positive_capacity() {
+        assert!(project_id_is_valid("existing-product"));
+        assert!(!project_id_is_valid("Existing product"));
+        assert!(project_name_is_valid("Existing product"));
+        assert!(!project_name_is_valid(" Existing product"));
+        assert_eq!(parse_project_execution_cap("2"), Some(2));
+        assert_eq!(parse_project_execution_cap("0"), None);
+        assert_eq!(parse_project_execution_cap("not-a-number"), None);
+    }
 
     #[test]
     fn work_item_id_suggestion_continues_the_project_prefix() {
@@ -2225,8 +2321,18 @@ fn ProjectGrid(
     portfolio: PortfolioSnapshot,
     execution_workspaces: Vec<ExecutionWorkspaceConnection>,
     on_connect: EventHandler<(String, Option<ExecutionWorkspaceConnection>, String)>,
+    new_project_id: Signal<String>,
+    new_project_name: Signal<String>,
+    new_project_execution_cap: Signal<String>,
+    new_project_workspace_location: Signal<String>,
+    on_create: EventHandler<(String, String, u32, String)>,
 ) -> Element {
     let project_count = portfolio.projects.len();
+    let existing_project_ids = portfolio
+        .projects
+        .iter()
+        .map(|project| project.id.clone())
+        .collect::<Vec<_>>();
     rsx! {
         section { class: "section-heading",
             div {
@@ -2234,6 +2340,15 @@ fn ProjectGrid(
                 h3 { "Projects" }
             }
             span { "{project_count} total" }
+        }
+
+        NewProjectForm {
+            existing_project_ids,
+            project_id: new_project_id,
+            name: new_project_name,
+            execution_cap: new_project_execution_cap,
+            workspace_location: new_project_workspace_location,
+            on_create,
         }
 
         section { class: "project-grid",
@@ -2246,6 +2361,99 @@ fn ProjectGrid(
                         .find(|connection| connection.project_id == project.id)
                         .cloned(),
                     on_connect,
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn NewProjectForm(
+    existing_project_ids: Vec<String>,
+    mut project_id: Signal<String>,
+    mut name: Signal<String>,
+    mut execution_cap: Signal<String>,
+    mut workspace_location: Signal<String>,
+    on_create: EventHandler<(String, String, u32, String)>,
+) -> Element {
+    let project_id_value = project_id.read().clone();
+    let name_value = name.read().clone();
+    let execution_cap_value = execution_cap.read().clone();
+    let workspace_location_value = workspace_location.read().clone();
+    let parsed_execution_cap = parse_project_execution_cap(&execution_cap_value);
+    let duplicate_id = existing_project_ids
+        .iter()
+        .any(|existing_project_id| existing_project_id == &project_id_value);
+    let can_create = project_id_is_valid(&project_id_value)
+        && project_name_is_valid(&name_value)
+        && parsed_execution_cap.is_some()
+        && !workspace_location_value.trim().is_empty()
+        && !duplicate_id;
+    rsx! {
+        details { class: "new-project",
+            summary { "Add existing project" }
+            div { class: "project-form",
+                label {
+                    span { "Stable ID" }
+                    input {
+                        aria_label: "New project ID",
+                        value: "{project_id_value}",
+                        maxlength: 64,
+                        placeholder: "my-product",
+                        oninput: move |event| project_id.set(event.value()),
+                    }
+                    small { "Lowercase letters, numbers, hyphens, or underscores." }
+                }
+                label {
+                    span { "Project name" }
+                    input {
+                        aria_label: "New project name",
+                        value: "{name_value}",
+                        maxlength: 256,
+                        placeholder: "My product",
+                        oninput: move |event| name.set(event.value()),
+                    }
+                }
+                label {
+                    span { "Execution capacity" }
+                    input {
+                        aria_label: "New project execution capacity",
+                        r#type: "number",
+                        min: "1",
+                        max: "4294967295",
+                        value: "{execution_cap_value}",
+                        oninput: move |event| execution_cap.set(event.value()),
+                    }
+                    small { "Positive local scheduling capacity; this does not start a Runner." }
+                }
+                label {
+                    span { "Existing local directory" }
+                    input {
+                        aria_label: "New project execution workspace",
+                        value: "{workspace_location_value}",
+                        maxlength: 2048,
+                        placeholder: "Select an existing project directory",
+                        oninput: move |event| workspace_location.set(event.value()),
+                    }
+                    small { "Stored as an in-place local connection only." }
+                }
+                if duplicate_id {
+                    p { class: "field-warning", "That Board project ID already exists." }
+                }
+                button {
+                    class: "project-create-action",
+                    disabled: !can_create,
+                    onclick: move |_| {
+                        if let Some(execution_cap) = parsed_execution_cap {
+                            on_create.call((
+                                project_id_value.clone(),
+                                name_value.trim().to_owned(),
+                                execution_cap,
+                                workspace_location_value.clone(),
+                            ));
+                        }
+                    },
+                    "Add project"
                 }
             }
         }

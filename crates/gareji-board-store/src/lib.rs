@@ -12,9 +12,9 @@ use gareji_board_domain::{
     ApprovalRequirement, AttachmentReceipt, AttachmentRequest, AttachmentTarget,
     CheckpointAttachment, CheckpointReconciliation, ExecutionWorkspaceConnection,
     ExecutionWorkspaceKind, ExecutionWorkspaceSaveReceipt, ExecutionWorkspaceSaveRequest,
-    PortfolioSnapshot, ProjectHealth, ProjectSummary, ReconciliationDecision,
-    ReconciliationReceipt, ReconciliationRequest, WorkItemCounts, WorkItemState, WorkItemSummary,
-    WorkItemTransitionReceipt, WorkItemTransitionRequest,
+    PortfolioSnapshot, ProjectCreateReceipt, ProjectCreateRequest, ProjectHealth, ProjectSummary,
+    ReconciliationDecision, ReconciliationReceipt, ReconciliationRequest, WorkItemCounts,
+    WorkItemState, WorkItemSummary, WorkItemTransitionReceipt, WorkItemTransitionRequest,
 };
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params, params_from_iter};
 use thiserror::Error;
@@ -238,6 +238,79 @@ impl SqliteBoardStore {
             projects.push(row.map_err(StoreError::Sqlite)?.try_into()?);
         }
         Ok(PortfolioSnapshot { projects })
+    }
+
+    /// Atomically add one Board project with its first local Execution workspace.
+    ///
+    /// # Errors
+    ///
+    /// Returns a bounded validation, duplicate-project, storage, or corrupt-state error.
+    /// A rejected request leaves neither a project nor a workspace connection behind.
+    pub fn create_project(
+        &mut self,
+        request: &ProjectCreateRequest,
+    ) -> Result<ProjectCreateReceipt, StoreError> {
+        validate_stable_identifier(&request.id)?;
+        validate_title(&request.name)?;
+        if request.name.trim() != request.name || request.execution_cap == 0 {
+            return Err(StoreError::InvalidRequest);
+        }
+        let execution_workspace = canonical_execution_workspace(&request.execution_workspace)?;
+        if execution_workspace.project_id != request.id
+            || execution_workspace.kind != ExecutionWorkspaceKind::LocalDirectory
+        {
+            return Err(StoreError::InvalidRequest);
+        }
+
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(StoreError::Sqlite)?;
+        let project_exists: bool = transaction
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM board_projects WHERE id = ?1)",
+                [&request.id],
+                |row| row.get(0),
+            )
+            .map_err(StoreError::Sqlite)?;
+        if project_exists {
+            return Err(StoreError::ProjectAlreadyExists);
+        }
+        transaction
+            .execute(
+                "INSERT INTO board_projects (id, name, health, execution_cap)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    request.id,
+                    request.name,
+                    ProjectHealth::Idle.as_str(),
+                    request.execution_cap
+                ],
+            )
+            .map_err(StoreError::Sqlite)?;
+        transaction
+            .execute(
+                "INSERT INTO board_execution_workspaces (project_id, kind, location)
+                 VALUES (?1, ?2, ?3)",
+                params![
+                    execution_workspace.project_id,
+                    execution_workspace.kind.as_str(),
+                    execution_workspace.location
+                ],
+            )
+            .map_err(StoreError::Sqlite)?;
+        transaction.commit().map_err(StoreError::Sqlite)?;
+
+        Ok(ProjectCreateReceipt {
+            project: ProjectSummary {
+                id: request.id.clone(),
+                name: request.name.clone(),
+                health: ProjectHealth::Idle,
+                execution_cap: request.execution_cap,
+                work_items: WorkItemCounts::default(),
+            },
+            execution_workspace,
+        })
     }
 
     /// Load the bounded Agent profile catalog used by Board scheduling.
@@ -1941,6 +2014,8 @@ pub enum StoreError {
     InvalidRequest,
     #[error("Board project was not found")]
     ProjectNotFound,
+    #[error("a Board project with this ID already exists")]
+    ProjectAlreadyExists,
     #[error("Work item was not found in the requested project")]
     WorkItemNotFound,
     #[error("Agent profile was not found")]
@@ -2107,6 +2182,89 @@ mod tests {
             }),
             Err(StoreError::InvalidRequest)
         ));
+    }
+
+    #[test]
+    fn project_creation_adds_an_idle_project_and_its_first_workspace_atomically() {
+        let mut store = SqliteBoardStore::open_in_memory().unwrap();
+        let request = ProjectCreateRequest {
+            id: "existing-product".to_owned(),
+            name: "Existing product".to_owned(),
+            execution_cap: 2,
+            execution_workspace: ExecutionWorkspaceConnection {
+                project_id: "existing-product".to_owned(),
+                kind: ExecutionWorkspaceKind::LocalDirectory,
+                location: Some(std::env::temp_dir().display().to_string()),
+            },
+        };
+
+        let receipt = store.create_project(&request).unwrap();
+        assert_eq!(receipt.project.id, "existing-product");
+        assert_eq!(receipt.project.health, ProjectHealth::Idle);
+        assert_eq!(receipt.project.execution_cap, 2);
+        assert_eq!(receipt.project.work_items, WorkItemCounts::default());
+        assert_eq!(receipt.execution_workspace, request.execution_workspace);
+        assert_eq!(
+            store.load_portfolio().unwrap().projects,
+            vec![receipt.project.clone()]
+        );
+        assert_eq!(
+            store.load_execution_workspaces().unwrap(),
+            vec![request.execution_workspace.clone()]
+        );
+
+        assert!(matches!(
+            store.create_project(&request),
+            Err(StoreError::ProjectAlreadyExists)
+        ));
+        assert_eq!(store.load_portfolio().unwrap().projects.len(), 1);
+        assert_eq!(store.load_execution_workspaces().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn project_creation_rejects_invalid_identity_capacity_and_connection_shapes() {
+        let mut store = SqliteBoardStore::open_in_memory().unwrap();
+        let location = std::env::temp_dir().display().to_string();
+        let valid = ProjectCreateRequest {
+            id: "existing-product".to_owned(),
+            name: "Existing product".to_owned(),
+            execution_cap: 1,
+            execution_workspace: ExecutionWorkspaceConnection {
+                project_id: "existing-product".to_owned(),
+                kind: ExecutionWorkspaceKind::LocalDirectory,
+                location: Some(location.clone()),
+            },
+        };
+        let invalid_id = ProjectCreateRequest {
+            id: "Existing Product".to_owned(),
+            ..valid.clone()
+        };
+        assert!(matches!(
+            store.create_project(&invalid_id),
+            Err(StoreError::InvalidRequest)
+        ));
+        let invalid_capacity = ProjectCreateRequest {
+            execution_cap: 0,
+            ..valid.clone()
+        };
+        assert!(matches!(
+            store.create_project(&invalid_capacity),
+            Err(StoreError::InvalidRequest)
+        ));
+        let mismatched_connection = ProjectCreateRequest {
+            execution_workspace: ExecutionWorkspaceConnection {
+                project_id: "another-project".to_owned(),
+                kind: ExecutionWorkspaceKind::LocalDirectory,
+                location: Some(location),
+            },
+            ..valid
+        };
+        assert!(matches!(
+            store.create_project(&mismatched_connection),
+            Err(StoreError::InvalidRequest)
+        ));
+        assert!(store.load_portfolio().unwrap().projects.is_empty());
+        assert!(store.load_execution_workspaces().unwrap().is_empty());
     }
 
     #[test]

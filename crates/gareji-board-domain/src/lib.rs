@@ -694,6 +694,22 @@ pub struct ProjectSummary {
     pub work_items: WorkItemCounts,
 }
 
+/// Explicit human intent to add one Board project with its first Execution workspace.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProjectCreateRequest {
+    pub id: String,
+    pub name: String,
+    pub execution_cap: u32,
+    pub execution_workspace: ExecutionWorkspaceConnection,
+}
+
+/// Durable result of one Board project creation attempt.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProjectCreateReceipt {
+    pub project: ProjectSummary,
+    pub execution_workspace: ExecutionWorkspaceConnection,
+}
+
 /// Complete bounded read model consumed by the initial Board screen.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct PortfolioSnapshot {
