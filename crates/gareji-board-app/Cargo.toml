@@ -1,0 +1,16 @@
+[package]
+name = "gareji-board-app"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+dioxus = { workspace = true, features = ["desktop", "document", "hooks", "html", "launch", "macro", "signals"] }
+directories.workspace = true
+gareji-board-domain.workspace = true
+gareji-board-store.workspace = true
+
+[lints]
+workspace = true

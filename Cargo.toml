@@ -1,0 +1,42 @@
+[workspace]
+members = [
+  "crates/gareji-board-app",
+  "crates/gareji-board-domain",
+  "crates/gareji-board-store",
+  "xtask",
+]
+default-members = [
+  "crates/gareji-board-domain",
+  "crates/gareji-board-store",
+  "xtask",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97"
+license = "Apache-2.0"
+repository = "https://github.com/Gareji-AI/gareji-board"
+
+[workspace.dependencies]
+anyhow = "1.0.100"
+dioxus = { version = "0.7.9", default-features = false }
+directories = "6.0.0"
+gareji-board-domain = { path = "crates/gareji-board-domain" }
+gareji-board-store = { path = "crates/gareji-board-store" }
+jsonschema = { version = "0.48.0", default-features = false }
+regex = "1.13.1"
+rusqlite = { version = "0.40.1", features = ["bundled"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.150"
+thiserror = "2.0.18"
+walkdir = "2.5.0"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
+module_name_repetitions = "allow"
