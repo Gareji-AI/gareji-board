@@ -4,15 +4,16 @@ use std::path::PathBuf;
 use dioxus::prelude::*;
 use gareji_board_core::CoreProgressReader;
 use gareji_board_domain::{
-    ActivityTimeline, AttachmentReceipt, AttachmentRequest, AttachmentTarget,
-    CheckpointDeliveryStatus, CheckpointOutcome, CheckpointReconciliation, PortfolioSnapshot,
-    ProgressActivity, ProjectHealth, ReconciliationDecision, ReconciliationReceipt,
-    ReconciliationRequest, WorkItemState, WorkItemSummary, WorkItemTransitionReceipt,
-    WorkItemTransitionRequest,
+    ActivityTimeline, AttachmentReceipt, AttachmentRequest, AttachmentTarget, AutopilotStopReason,
+    CandidateSkipReason, CheckpointDeliveryStatus, CheckpointOutcome, CheckpointReconciliation,
+    NoCandidateReason, PortfolioSnapshot, ProgressActivity, ProjectHealth, ReconciliationDecision,
+    ReconciliationReceipt, ReconciliationRequest, SafeAutopilotOutcome, SafeAutopilotPreview,
+    WorkItemState, WorkItemSummary, WorkItemTransitionReceipt, WorkItemTransitionRequest,
 };
 use gareji_board_store::{SqliteBoardStore, default_board_database_path};
 
 const APP_CSS: &str = include_str!("style.css");
+const PREVIEW_GLOBAL_CONCURRENCY_CAP: u32 = 2;
 const WORK_ITEM_STATES: [WorkItemState; 7] = [
     WorkItemState::Backlog,
     WorkItemState::Todo,
@@ -38,6 +39,7 @@ struct AppState {
     reconciliation_notice: Option<String>,
     attachment_notice: Option<String>,
     transition_notice: Option<String>,
+    autopilot_preview: Option<SafeAutopilotPreview>,
 }
 
 fn load_app_state() -> AppState {
@@ -84,6 +86,7 @@ fn load_app_state() -> AppState {
                 reconciliation_notice: None,
                 attachment_notice: None,
                 transition_notice: None,
+                autopilot_preview: None,
             }
         }
         Err(error) => AppState {
@@ -96,6 +99,7 @@ fn load_app_state() -> AppState {
             reconciliation_notice: None,
             attachment_notice: None,
             transition_notice: None,
+            autopilot_preview: None,
         },
     }
 }
@@ -134,6 +138,15 @@ fn App() -> Element {
     let active_runs = snapshot.portfolio.active_runs();
     let blocked_items = snapshot.portfolio.blocked_items();
     let delivery_issues = snapshot.activity.delivery_issues();
+    let preview_portfolio = snapshot.portfolio.clone();
+    let preview_work_items = snapshot.work_items.clone();
+    let on_preview = move |_| {
+        state.write().autopilot_preview = Some(SafeAutopilotPreview::evaluate(
+            &preview_portfolio,
+            &preview_work_items,
+            PREVIEW_GLOBAL_CONCURRENCY_CAP,
+        ));
+    };
     let on_attach = move |request: AttachmentRequest| match attach(&request) {
         Ok(receipt) => {
             let mut reloaded = load_app_state();
@@ -172,20 +185,17 @@ fn App() -> Element {
                 div { class: "status-pill", span { class: "status-dot" } "Local · Ready" }
             }
 
-            section { class: "hero",
-                div {
-                    p { class: "kicker", "Portfolio overview" }
-                    h2 { "See what every agent is doing—without opening a terminal." }
-                    p { class: "lede", "Board-owned coordination stays local. Recent progress is read from Core as evidence, while Work item changes remain yours to approve." }
-                }
-                button { class: "primary", disabled: true, "Run next safe item" }
-            }
+            PortfolioHero { on_preview }
 
             section { class: "metrics", aria_label: "Portfolio metrics",
                 Metric { value: project_count.to_string(), label: "Projects" }
                 Metric { value: active_runs.to_string(), label: "Active runs" }
                 Metric { value: blocked_items.to_string(), label: "Need attention" }
                 Metric { value: delivery_issues.to_string(), label: "Delivery issues" }
+            }
+
+            if let Some(preview) = &snapshot.autopilot_preview {
+                AutopilotPreviewPanel { preview: preview.clone() }
             }
 
             if let Some(warning) = &snapshot.warning {
@@ -226,6 +236,25 @@ fn App() -> Element {
             footer { class: "app-footer",
                 span { "Local data" }
                 code { "{snapshot.storage_label}" }
+            }
+        }
+    }
+}
+
+#[component]
+fn PortfolioHero(on_preview: EventHandler<MouseEvent>) -> Element {
+    rsx! {
+        section { class: "hero",
+            div {
+                p { class: "kicker", "Portfolio overview" }
+                h2 { "See what every agent is doing—without opening a terminal." }
+                p { class: "lede", "Board-owned coordination stays local. Recent progress is read from Core as evidence, while Work item changes remain yours to approve." }
+            }
+            button {
+                class: "preview-action",
+                title: "Preview only; Runner will not start",
+                onclick: move |event| on_preview.call(event),
+                "Preview next safe item"
             }
         }
     }
@@ -689,7 +718,7 @@ fn WorkItemCard(
                     "{work_item_state_label(item.state)}"
                 }
             }
-            p { class: "work-item-project", "{item.project_id}" }
+            p { class: "work-item-project", "{item.project_id} · Priority {item.priority}" }
             p { class: "work-item-eligibility", "{work_item_eligibility_label(item.state)}" }
             div { class: "work-item-actions",
                 label {
@@ -718,6 +747,134 @@ fn WorkItemCard(
                     "Update state"
                 }
             }
+        }
+    }
+}
+
+#[component]
+fn AutopilotPreviewPanel(preview: SafeAutopilotPreview) -> Element {
+    let decision = preview.decision().as_str();
+    let fast_exit = if preview.fast_exit_required() {
+        "Fast exit required"
+    } else {
+        "Candidate available"
+    };
+    rsx! {
+        section { class: "autopilot-preview", aria_live: "polite",
+            header { class: "preview-head",
+                div {
+                    p { class: "kicker", "Safe Autopilot preview" }
+                    h3 { "Next-action explanation" }
+                }
+                div { class: "preview-statuses",
+                    span { class: "decision-pill", "Decision · {decision}" }
+                    span { class: "preview-read-only", "Read-only · Runner not started" }
+                }
+            }
+
+            match &preview.outcome {
+                SafeAutopilotOutcome::Candidate(candidate) => rsx! {
+                    article { class: "preview-candidate",
+                        div { class: "preview-candidate-id",
+                            span { "Selected candidate" }
+                            strong { "{candidate.work_item.id}" }
+                        }
+                        div { class: "preview-candidate-body",
+                            h4 { "{candidate.work_item.title}" }
+                            p {
+                                "{candidate.project_name} is at {candidate.active_runs}/{candidate.execution_cap} active capacity. This item is priority {candidate.work_item.priority}."
+                            }
+                            div { class: "preview-facts",
+                                span { "Lowest project load first" }
+                                span { "Then priority" }
+                                span { "Then stable IDs" }
+                            }
+                        }
+                    }
+                },
+                SafeAutopilotOutcome::NoCandidate(reason) => rsx! {
+                    article { class: "preview-empty-result",
+                        strong { "No candidate this tick" }
+                        p { "{no_candidate_message(*reason)}" }
+                    }
+                },
+                SafeAutopilotOutcome::Stop(reason) => rsx! {
+                    article { class: "preview-stop-result",
+                        strong { "Preview stopped safely" }
+                        p { "{autopilot_stop_message(reason)}" }
+                    }
+                },
+            }
+
+            div { class: "preview-foot",
+                div {
+                    strong { "{fast_exit}" }
+                    p { "Execution still requires dependency, approval, capability, workspace, cooldown, and evidence preflights." }
+                }
+                span { "Global capacity {PREVIEW_GLOBAL_CONCURRENCY_CAP}" }
+            }
+
+            if !preview.skipped.is_empty() {
+                details { class: "preview-skips",
+                    summary { "Why {preview.skipped.len()} other Work item(s) were skipped" }
+                    ul {
+                        for skip in &preview.skipped {
+                            li { key: "{skip.work_item.project_id}-{skip.work_item.id}",
+                                strong { "{skip.work_item.id}" }
+                                span { "{candidate_skip_message(skip.reason)}" }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn candidate_skip_message(reason: CandidateSkipReason) -> String {
+    match reason {
+        CandidateSkipReason::StateNotTodo(state) => {
+            format!("State is {state}; preview considers todo only.")
+        }
+        CandidateSkipReason::ProjectAtCapacity {
+            active_runs,
+            execution_cap,
+        } => format!("Project capacity is full at {active_runs}/{execution_cap}."),
+        CandidateSkipReason::GlobalCapacityReached {
+            active_runs,
+            concurrency_cap,
+        } => format!("Global capacity is full at {active_runs}/{concurrency_cap}."),
+        CandidateSkipReason::LowerRanked => {
+            "Runnable, but ranked behind the selected candidate.".to_owned()
+        }
+    }
+}
+
+fn no_candidate_message(reason: NoCandidateReason) -> String {
+    match reason {
+        NoCandidateReason::GlobalCapacityReached {
+            active_runs,
+            concurrency_cap,
+        } => format!("Global capacity is already {active_runs}/{concurrency_cap}."),
+        NoCandidateReason::NoRunnableCandidate => {
+            "No todo Work item belongs to a project with available capacity.".to_owned()
+        }
+    }
+}
+
+fn autopilot_stop_message(reason: &AutopilotStopReason) -> String {
+    match reason {
+        AutopilotStopReason::InvalidGlobalConcurrencyCap => {
+            "The global concurrency cap is invalid.".to_owned()
+        }
+        AutopilotStopReason::InvalidProjectCapacity { project_id } => {
+            format!("Project {project_id} has an invalid execution cap.")
+        }
+        AutopilotStopReason::DuplicateProject { project_id } => {
+            format!("Project {project_id} appears more than once.")
+        }
+        AutopilotStopReason::ProjectNotFound { project_id } => {
+            format!("A Work item refers to missing project {project_id}.")
         }
     }
 }
