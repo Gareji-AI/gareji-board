@@ -1,5 +1,48 @@
 //! Board Adapter for the reusable local Core bridge.
 
+mod approach_note;
+mod blueprint_application;
+mod blueprint_draft;
+mod board_run;
+mod control_node;
+mod graph_draft;
+mod graph_rewrite;
+mod portfolio_draft;
+mod portfolio_orchestration;
+mod portfolio_scheduler;
+mod runner_graph;
+mod runner_progress;
+
+pub use approach_note::{ApproachNoteReadError, MarkdownApproachNoteReader};
+pub use blueprint_application::{
+    ApproachNotePin, BlueprintApplicationBlock, BlueprintApplicationBlockedReason,
+    BlueprintApplicationPlanner, BlueprintApplicationPreview, BlueprintApplicationProposal,
+    BlueprintPlanningFacts,
+};
+pub use blueprint_draft::{BlueprintDraft, BlueprintDraftError};
+pub use board_run::{BoardRunController, BoardRunError, BoardRunOutcome, PreparedBoardRun};
+pub use control_node::{
+    ControlNodeController, ControlNodeError, ControlNodeTransitionReceipt, CurrentControlNode,
+    EvidenceRouteRequest, HumanApprovalRequest, PermittedControlRoute,
+};
+pub use graph_draft::{GraphDraft, GraphDraftError};
+pub use graph_rewrite::{GraphRewriteController, GraphRewriteError};
+pub use portfolio_draft::{PortfolioDraft, PortfolioDraftError};
+pub use portfolio_orchestration::{
+    PortfolioOrchestrationController, PortfolioPreviewBlockedReason, PortfolioPreviewFacts,
+    PortfolioRunController, PortfolioStepOutcome, PortfolioStepPreview, PortfolioTickError,
+    PortfolioTickMode, PortfolioTickReceipt, PortfolioTickRequest,
+};
+pub use portfolio_scheduler::{
+    PortfolioScheduler, PortfolioSchedulerError, PortfolioSchedulerReport, ScheduledPortfolioTick,
+};
+pub use runner_graph::{
+    RunnerGraphController, RunnerGraphError, RunnerRouteOutcome, RunnerRouteStayReason,
+};
+pub use runner_progress::{
+    RunnerCompletionReceipt, RunnerProgressConnector, RunnerProgressError, RunnerProgressReceipt,
+};
+
 use std::env;
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::PathBuf;
@@ -152,7 +195,7 @@ impl CoreProgressReader {
     }
 }
 
-#[derive(Debug, Error, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
 pub enum CoreReadError {
     #[error("Gareji Core is not available")]
     Unavailable,
@@ -315,6 +358,9 @@ enum CoreBridgeOperation {
         work_item_id: Option<String>,
         before_checkpoint_id: Option<String>,
         limit: u16,
+    },
+    RecordProgress {
+        checkpoint: Value,
     },
 }
 

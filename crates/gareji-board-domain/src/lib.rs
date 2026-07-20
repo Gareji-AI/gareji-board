@@ -1,5 +1,34 @@
 //! Board-owned portfolio terminology and read models.
 
+mod control_graph;
+mod orchestration_blueprint;
+mod portfolio_orchestration;
+
+pub use control_graph::{
+    AgentLoopExecutionTarget, ControlExecutionTargetError, ControlGraphRevision,
+    ControlGraphValidationError, ControlNode, ControlNodeKind, ControlRoute,
+    ControlRouteSelectionError, ControlSignal, GraphAnchor, GraphCanvasLayout,
+    GraphCanvasNodePosition, GraphEntry, GraphRewriteDecision, GraphRewriteDecisionReceipt,
+    GraphRewriteDecisionRequest, GraphRewriteOperation, GraphRewriteProposal,
+    GraphRewriteProposalRequest, GraphRewriteProposalStatus, ProjectGraphBinding,
+    ProjectGraphBindingSaveReceipt, ProjectGraphBindingSaveRequest, RouteDecision,
+    RouteDecisionReceipt, RouteDecisionRequest, SelectedControlRoute, WorkItemGraphPosition,
+};
+pub use orchestration_blueprint::{
+    ApproachNoteManifest, ApproachNoteValidationError, ApproachRisk, BlueprintApplication,
+    BlueprintApplicationReceipt, BlueprintApproachNotePin, BlueprintLink, BlueprintLinkKind,
+    BlueprintNode, BlueprintNodeKind, BlueprintPostAction, BlueprintRuntimeBinding, BlueprintScope,
+    BlueprintValidationError, NoteSocketDirection, NoteSocketKind, OrchestrationBlueprintRevision,
+};
+pub use portfolio_orchestration::{
+    PortfolioApprovalDecision, PortfolioNode, PortfolioNodeKind, PortfolioOrchestrationRevision,
+    PortfolioOrchestrationValidationError, PortfolioPostAction, PortfolioProjectSelector,
+    PortfolioRoute, PortfolioRun, PortfolioRunStatus, PortfolioRunStatusParseError,
+    PortfolioRunStep, PortfolioSchedule, PortfolioScheduleControl,
+    PortfolioScheduleControlSaveReceipt, PortfolioScheduleControlSaveRequest, PortfolioSignal,
+    PortfolioSignalParseError,
+};
+
 use std::collections::HashMap;
 use std::fmt;
 
@@ -876,6 +905,41 @@ impl SafeAutopilotPreview {
         agent_profiles: &[AgentProfileSummary],
         global_concurrency_cap: u32,
     ) -> Self {
+        Self::evaluate_with_project_filter(
+            portfolio,
+            work_items,
+            agent_profiles,
+            global_concurrency_cap,
+            None,
+        )
+    }
+
+    /// Evaluate one managed project's candidates while retaining portfolio-wide
+    /// dependency and identity facts.
+    #[must_use]
+    pub fn evaluate_for_project(
+        portfolio: &PortfolioSnapshot,
+        work_items: &[WorkItemSummary],
+        agent_profiles: &[AgentProfileSummary],
+        global_concurrency_cap: u32,
+        project_id: &str,
+    ) -> Self {
+        Self::evaluate_with_project_filter(
+            portfolio,
+            work_items,
+            agent_profiles,
+            global_concurrency_cap,
+            Some(project_id),
+        )
+    }
+
+    fn evaluate_with_project_filter(
+        portfolio: &PortfolioSnapshot,
+        work_items: &[WorkItemSummary],
+        agent_profiles: &[AgentProfileSummary],
+        global_concurrency_cap: u32,
+        project_filter: Option<&str>,
+    ) -> Self {
         if global_concurrency_cap == 0 {
             return Self::stopped(AutopilotStopReason::InvalidGlobalConcurrencyCap);
         }
@@ -885,6 +949,13 @@ impl SafeAutopilotPreview {
                 Ok(indexes) => indexes,
                 Err(reason) => return Self::stopped(reason),
             };
+        if let Some(project_id) = project_filter
+            && !projects.contains_key(project_id)
+        {
+            return Self::stopped(AutopilotStopReason::ProjectNotFound {
+                project_id: project_id.to_owned(),
+            });
+        }
 
         let active_runs = portfolio.active_runs();
         let global_capacity_reached = active_runs >= global_concurrency_cap;
@@ -892,6 +963,9 @@ impl SafeAutopilotPreview {
         let mut skipped = Vec::new();
 
         for work_item in work_items {
+            if project_filter.is_some_and(|project_id| work_item.project_id != project_id) {
+                continue;
+            }
             let project = projects[work_item.project_id.as_str()];
             let preflight = Self::candidate_preflight(
                 work_item,
@@ -1368,6 +1442,29 @@ mod tests {
             };
             assert_eq!(candidate.work_item.id, "BOARD-2");
         }
+    }
+
+    #[test]
+    fn project_preview_retains_cross_project_dependency_facts() {
+        let portfolio = PortfolioSnapshot {
+            projects: vec![project("board", 0, 2), project("core", 0, 1)],
+        };
+        let prerequisite = work_item("CORE-1", "core", 1, WorkItemState::Done);
+        let mut dependent = work_item("BOARD-1", "board", 1, WorkItemState::Todo);
+        dependent.dependency_ids.push("CORE-1".to_owned());
+
+        let preview = SafeAutopilotPreview::evaluate_for_project(
+            &portfolio,
+            &[prerequisite, dependent],
+            &agent_profiles(),
+            3,
+            "board",
+        );
+
+        let SafeAutopilotOutcome::Candidate(candidate) = preview.outcome else {
+            panic!("expected a project-scoped candidate")
+        };
+        assert_eq!(candidate.work_item.id, "BOARD-1");
     }
 
     #[test]

@@ -16,7 +16,7 @@ All sources call the same Progress Recorder Module:
 
 | Source | v0 behavior |
 |---|---|
-| Runner | Record after a bounded Run result or reconciliation |
+| Runner | Implemented: record one linked Checkpoint after every started bounded Run result |
 | MCP `record_progress` | Record a structured checkpoint supplied by an enabled agent or Skill |
 | `gareji checkpoint` | Let a person save meaningful intermediate work explicitly |
 | Codex `Stop` Hook | Record once at turn end when a connected workspace has a material change or structured handoff |
@@ -52,6 +52,8 @@ Validation, workspace resolution, redaction, idempotency, durable outbox writes,
 The only MCP tool that creates progress is `record_progress`. MCP does not expose a capture-time `complete_work_item` shortcut. A checkpoint carries `recommended_state`; Gareji Board applies or requests approval for the actual transition.
 
 The first Board approval flow records one final reconciliation decision per linked Checkpoint. An accepted supported recommendation and its Work item transition commit together; a dismissed recommendation leaves state unchanged. Core's Checkpoint is never edited, and correcting a past decision uses a separate Work item action so the evidence trail remains understandable.
+
+The Codex Runner connection uses the stable `checkpoint-<run-id>` identity. It records relative changed paths, final Git revision, branch, dirty state, bounded verification summaries, and opaque `run://` evidence references. It never places the local worktree path, raw JSONL, prompt, or full diff in the Checkpoint. Core acceptance returns the delivery states used to construct an immediate Activity entry; a later portfolio reload reads the same immutable record through `list_progress`.
 
 ## Task linking
 

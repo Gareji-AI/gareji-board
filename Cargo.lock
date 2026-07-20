@@ -1619,6 +1619,7 @@ dependencies = [
  "gareji-board-core",
  "gareji-board-domain",
  "gareji-board-store",
+ "tokio",
 ]
 
 [[package]]
@@ -1627,6 +1628,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "gareji-board-core",
  "gareji-board-domain",
  "gareji-board-store",
  "serde",
@@ -1639,8 +1641,12 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "gareji-board-domain",
+ "gareji-board-runner",
+ "gareji-board-store",
+ "jsonschema",
  "serde",
  "serde_json",
+ "sha2",
  "thiserror 2.0.18",
 ]
 
@@ -1652,12 +1658,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "gareji-board-runner"
+version = "0.1.0"
+dependencies = [
+ "directories",
+ "gareji-board-domain",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "gareji-board-store"
 version = "0.1.0"
 dependencies = [
  "directories",
  "gareji-board-domain",
  "rusqlite",
+ "serde_json",
  "thiserror 2.0.18",
 ]
 

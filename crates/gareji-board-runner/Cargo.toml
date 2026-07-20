@@ -1,5 +1,5 @@
 [package]
-name = "gareji-board-core"
+name = "gareji-board-runner"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -7,17 +7,11 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-chrono.workspace = true
+directories.workspace = true
 gareji-board-domain.workspace = true
-gareji-board-runner.workspace = true
-gareji-board-store.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-sha2.workspace = true
 thiserror.workspace = true
-
-[dev-dependencies]
-jsonschema.workspace = true
 
 [lints]
 workspace = true

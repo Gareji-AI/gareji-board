@@ -4,7 +4,7 @@ The demo proves two product claims in one local workflow: direct development sta
 
 ## Act 1: Start without setup
 
-1. Run `gareji-board demo`.
+1. Run `gareji-board demo --reset` (or `cargo run -p gareji-board-bridge --bin gareji-board -- demo --reset` from the source checkout).
 2. Open the three bundled product projects and inspect the visible task states.
 3. Show the dependency-free `local_json` and Markdown Zettelkasten Knowledge connections enabled together, plus the bundled Skills.
 

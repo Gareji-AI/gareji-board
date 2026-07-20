@@ -1,0 +1,3 @@
+# Apply project-independent Orchestration Blueprints
+
+Gareji Board will define reusable orchestration as immutable, project-independent Blueprints and resolve concrete projects, Work items, Agent profiles, Approach Note fingerprints, and Execution workspaces only in an accepted Runtime Binding. This replaces the long-term assumption that every project owns one fixed graph binding: a Blueprint Application can be proposed across managed projects by Safe Autopilot, while deterministic validation, explicit approval boundaries, pinned in-flight revisions, and Core capability policy continue to prevent a model from inventing authority or silently changing active work.
