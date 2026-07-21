@@ -228,6 +228,7 @@ mod tests {
         let mut store = SqliteBoardStore::open_in_memory().unwrap();
         store.seed_sample_if_empty().unwrap();
         store.ensure_builtin_control_graphs().unwrap();
+        let workspace_location = std::env::temp_dir().display().to_string();
         store
             .save_project_graph_binding(&ProjectGraphBindingSaveRequest {
                 expected: None,
@@ -249,7 +250,7 @@ mod tests {
                 target: ExecutionWorkspaceConnection {
                     project_id: "gareji-board".to_owned(),
                     kind: ExecutionWorkspaceKind::LocalDirectory,
-                    location: Some("C:/work/gareji-board".to_owned()),
+                    location: Some(workspace_location.clone()),
                 },
             })
             .unwrap();
@@ -267,7 +268,7 @@ mod tests {
         assert_eq!(prepared.request.agent_profile.id, "researcher");
         assert_eq!(
             prepared.request.execution_workspace.location.as_deref(),
-            Some("C:/work/gareji-board")
+            Some(workspace_location.as_str())
         );
         assert_eq!(prepared.request.timeout_seconds, 1_200);
         let stored = store
@@ -312,6 +313,7 @@ mod tests {
         let mut store = SqliteBoardStore::open_in_memory().unwrap();
         store.seed_sample_if_empty().unwrap();
         store.ensure_builtin_control_graphs().unwrap();
+        let workspace_location = std::env::temp_dir().display().to_string();
         store
             .save_project_graph_binding(&ProjectGraphBindingSaveRequest {
                 expected: None,
@@ -333,7 +335,7 @@ mod tests {
                 target: ExecutionWorkspaceConnection {
                     project_id: "gareji-board".to_owned(),
                     kind: ExecutionWorkspaceKind::LocalDirectory,
-                    location: Some("C:/work/gareji-board".to_owned()),
+                    location: Some(workspace_location),
                 },
             })
             .unwrap();
