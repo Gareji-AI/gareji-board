@@ -1,6 +1,6 @@
 # ADR 0006: Use Rust for shipped Gareji products
 
-Status: accepted.
+Status: superseded by ADR 0016.
 
 Gareji Core, Runner, MCP, Board state, Knowledge Adapters, and shipped validation commands use Rust. Board uses Dioxus Desktop so application logic remains Rust while HTML and CSS provide an accessible portfolio interface. Gareji does not add Tauri around Dioxus because the second desktop host would add an Interface without providing a second required Adapter.
 

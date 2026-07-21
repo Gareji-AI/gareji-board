@@ -2,6 +2,8 @@ node_modules/
 dist/
 target/
 .dioxus/
+crates/gareji-board-app/gen/
 .env
 .agentmesh/
+.scratch/
 *.log
