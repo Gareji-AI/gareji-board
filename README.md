@@ -1,5 +1,7 @@
 # Gareji Board
 
+![Gareji — local-first agent operations](docs/assets/gareji-devpost-hero.png)
+
 Gareji Board is a no-code workboard for human–AI teams. It makes autonomous work visible: what is ready, which custom agent is running it, what evidence it produced, and where it stopped.
 
 ## Product promise
