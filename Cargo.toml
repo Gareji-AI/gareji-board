@@ -4,6 +4,7 @@ members = [
   "crates/gareji-board-bridge",
   "crates/gareji-board-core",
   "crates/gareji-board-domain",
+  "crates/gareji-board-runner",
   "crates/gareji-board-store",
   "xtask",
 ]
@@ -11,6 +12,7 @@ default-members = [
   "crates/gareji-board-bridge",
   "crates/gareji-board-core",
   "crates/gareji-board-domain",
+  "crates/gareji-board-runner",
   "crates/gareji-board-store",
   "xtask",
 ]
@@ -27,9 +29,9 @@ repository = "https://github.com/Gareji-AI/gareji-board"
 anyhow = "1.0.100"
 chrono = { version = "0.4.44", default-features = false, features = ["std"] }
 clap = { version = "4.6.0", features = ["derive", "env"] }
-dioxus = { version = "0.7.9", default-features = false }
 directories = "6.0.0"
 gareji-board-domain = { path = "crates/gareji-board-domain" }
+gareji-board-runner = { path = "crates/gareji-board-runner" }
 gareji-board-bridge = { path = "crates/gareji-board-bridge" }
 gareji-board-core = { path = "crates/gareji-board-core" }
 gareji-board-store = { path = "crates/gareji-board-store" }
@@ -38,7 +40,9 @@ regex = "1.13.1"
 rusqlite = { version = "0.40.1", features = ["bundled"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
+sha2 = "0.10.9"
 thiserror = "2.0.18"
+tokio = { version = "1.53.0", features = ["rt", "time"] }
 walkdir = "2.5.0"
 
 [workspace.lints.rust]

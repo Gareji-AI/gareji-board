@@ -1,5 +1,7 @@
 # Gareji Runner design
 
+Status: Codex Adapter, isolated worktree execution, Board start controller, and Core Progress Checkpoint projection implemented; Core capability composition remains pending.
+
 ## Purpose
 
 Gareji Runner is the local execution module inside Gareji Board. It schedules eligible work, resolves an agent and model, invokes Codex through Gareji Core, and converts execution events into visible Board state.
@@ -26,6 +28,8 @@ The execution workspace is the checked and explicitly connected local directory 
 For a Git Execution workspace, every Runner-started Run uses its own Git worktree, including when the project's concurrency cap is one. Parallel Runs never share a worktree: each Work item receives a distinct branch and worktree registered against its Run. The connected checkout remains available for direct human–Codex work and keeps one explicit active Work item at a time.
 
 The v0 Runner blocks a mutating Run for a non-Git Execution workspace because Git worktree isolation is unavailable. A non-Git directory may still be connected for context inspection and direct work. Gareji must not silently fall back to running an autonomous mutation in the shared directory.
+
+Runner-generated Run identities use lowercase ASCII letters, digits, `-`, or `_`, up to 64 bytes. This keeps local evidence directories and `gareji/run-<run-id>` branch names collision-free and portable.
 
 Runner records the branch, worktree location, base revision, and final revision as Run evidence. Cleanup occurs only after the Progress Checkpoint and evidence are durable and the worktree has no unrecorded changes; otherwise the worktree remains visible for recovery.
 
@@ -74,6 +78,8 @@ codex exec --profile <profile> --model <resolved-model> --json --output-schema <
 
 Runner never builds this command through shell-string interpolation. An unknown or rejected model produces a bounded `configuration_error` before the work item starts.
 
+The implementation also supplies `--sandbox workspace-write`, `--color never`, an explicit worktree root through `--cd`, and `--output-last-message` for the bounded JSON handoff. It does not use sandbox bypass or Hook-trust bypass flags.
+
 ## Run evidence
 
 Every run records:
@@ -88,3 +94,15 @@ Every run records:
 - failure category and next action.
 
 This makes model comparisons possible without making execution opaque.
+
+The first implementation preserves every Run worktree. A later explicit cleanup operation may remove a worktree only after its Checkpoint and evidence are durable and Git reports no unrecorded changes.
+
+## Board start controller
+
+The desktop does not assemble Runner requests itself. A Board-owned controller loads one eligible Work item, pins its current Project Graph revision and entry, resolves the current Agent Loop, verifies that Agent's declared capabilities, selects the project's connected local Execution workspace, and runs the same Runner preflight used at execution time.
+
+The Graph target is projected into the one-Run request without overwriting the Work item's durable Agent assignment. The Runner receives only the resulting Work item, Agent profile, workspace, and model selection; it does not receive or interpret Graph topology.
+
+After an explicit click in the Safe Autopilot preview, execution runs off the desktop UI thread. The controller preserves the complete Runner result even when Core recording fails. When Core accepts the Checkpoint, the same transaction-safe completion path applies its evidence to the pinned Graph route. The desktop then reloads Activity and current Graph positions from durable state.
+
+A completed Agent Loop may end at a declared `needs_approval` route as well as `succeeded` or `passed`. Runner never decides the approval. It stops at the Approval node, where the desktop requires a separate explicit human action before Board records an `approved` route.

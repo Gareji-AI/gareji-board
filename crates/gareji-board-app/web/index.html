@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="dark" />
+    <title>Gareji Board</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <a class="skip-link" href="#workspace">Skip to workspace</a>
+    <div id="app" class="app-shell" aria-busy="true">
+      <header class="app-header">
+        <div class="brand-mark" aria-hidden="true">G</div>
+        <div>
+          <strong>Gareji Board</strong>
+          <span>Local operations desk</span>
+        </div>
+        <div id="connection-status" class="connection-status">Opening local Board…</div>
+      </header>
+      <nav id="primary-nav" class="primary-nav" aria-label="Primary"></nav>
+      <main id="workspace" class="workspace" tabindex="-1"></main>
+      <footer class="app-footer">
+        <details>
+          <summary>Storage details</summary>
+          <code id="storage-label"></code>
+        </details>
+      </footer>
+    </div>
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
+    <script type="module" src="main.js"></script>
+  </body>
+</html>

@@ -4,9 +4,9 @@ Gareji Board has two first-launch paths. Both produce the same Board project mod
 
 ## Open sample
 
-`gareji-board demo` creates a disposable session from the bundled fixture, then opens the Board. The session includes three sample projects, four agent profiles, four inspectable instruction files, four inspectable Skills, safe autopilot settings, and example success and blocked outcomes.
+`gareji-board demo` creates or reopens a disposable session from the bundled fixture, then opens the Board. `gareji-board demo --reset` restores the copied fixture state before opening, and `gareji-board demo --prepare-only` prepares and validates the session without opening a window. From a source checkout, prefix those arguments with `cargo run -p gareji-board-bridge --bin gareji-board --`. The session includes three sample projects, four agent profiles, four inspectable instruction files, four inspectable Skills, safe autopilot settings, and example success and blocked outcomes.
 
-The launcher copies writable demo material into an application-owned session directory. Knowledge notes come from the demo Knowledge workspace; Agent instructions and Skills come from the separate demo Execution workspace fixture. It never writes into either bundled fixture, a personal knowledge workspace, or an existing source repository. The user can reset the session to its original state.
+The launcher copies writable demo material into an application-owned `demo-session` directory. Knowledge notes come from the copied demo Knowledge workspace; Agent instructions and Skills come from the copied demo Execution workspace. The launcher uses `demo-session/board.sqlite3` even when `GAREJI_BOARD_DB` selects a normal Board database. It only removes an existing session during `--reset` after verifying its private marker, and never writes into either bundled fixture, a personal knowledge workspace, or an existing source repository.
 
 ## Add or connect an existing execution workspace
 

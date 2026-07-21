@@ -1,21 +1,34 @@
 //! `SQLite` implementation for Board-owned coordination state.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::path::Path;
 use std::time::Duration;
 
 use directories::ProjectDirs;
 use gareji_board_domain::{
-    ActiveWorkAssessment, ActivityTimeline, AgentPlan, AgentPlanUpdateReceipt,
-    AgentPlanUpdateRequest, AgentProfileSaveReceipt, AgentProfileSaveRequest, AgentProfileSummary,
-    ApprovalRequirement, AttachmentReceipt, AttachmentRequest, AttachmentTarget,
-    CheckpointAttachment, CheckpointReconciliation, ExecutionWorkspaceConnection,
-    ExecutionWorkspaceKind, ExecutionWorkspaceSaveReceipt, ExecutionWorkspaceSaveRequest,
-    PortfolioSnapshot, ProjectCreateReceipt, ProjectCreateRequest, ProjectHealth, ProjectSummary,
-    ReconciliationDecision, ReconciliationReceipt, ReconciliationRequest, WorkItemCounts,
-    WorkItemCreateReceipt, WorkItemCreateRequest, WorkItemState, WorkItemSummary,
-    WorkItemTransitionReceipt, WorkItemTransitionRequest,
+    ActiveWorkAssessment, ActivityTimeline, AgentLoopExecutionTarget, AgentPlan,
+    AgentPlanUpdateReceipt, AgentPlanUpdateRequest, AgentProfileSaveReceipt,
+    AgentProfileSaveRequest, AgentProfileSummary, ApprovalRequirement, AttachmentReceipt,
+    AttachmentRequest, AttachmentTarget, BlueprintApplication, BlueprintApplicationReceipt,
+    BlueprintApproachNotePin, BlueprintLink, BlueprintLinkKind, BlueprintNode, BlueprintNodeKind,
+    BlueprintRuntimeBinding, BlueprintScope, CheckpointAttachment, CheckpointReconciliation,
+    ControlGraphRevision, ControlNode, ControlNodeKind, ControlRoute, ControlSignal,
+    ExecutionWorkspaceConnection, ExecutionWorkspaceKind, ExecutionWorkspaceSaveReceipt,
+    ExecutionWorkspaceSaveRequest, GraphAnchor, GraphCanvasLayout, GraphEntry,
+    GraphRewriteDecision, GraphRewriteDecisionReceipt, GraphRewriteDecisionRequest,
+    GraphRewriteOperation, GraphRewriteProposal, GraphRewriteProposalStatus, NoteSocketKind,
+    OrchestrationBlueprintRevision, PortfolioNode, PortfolioNodeKind,
+    PortfolioOrchestrationRevision, PortfolioPostAction, PortfolioProjectSelector, PortfolioRoute,
+    PortfolioRun, PortfolioRunStatus, PortfolioRunStep, PortfolioSchedule,
+    PortfolioScheduleControl, PortfolioScheduleControlSaveReceipt,
+    PortfolioScheduleControlSaveRequest, PortfolioSignal, PortfolioSnapshot, ProjectCreateReceipt,
+    ProjectCreateRequest, ProjectGraphBinding, ProjectGraphBindingSaveReceipt,
+    ProjectGraphBindingSaveRequest, ProjectHealth, ProjectSummary, ReconciliationDecision,
+    ReconciliationReceipt, ReconciliationRequest, RouteDecision, RouteDecisionReceipt,
+    RouteDecisionRequest, WorkItemCounts, WorkItemCreateReceipt, WorkItemCreateRequest,
+    WorkItemGraphPosition, WorkItemState, WorkItemSummary, WorkItemTransitionReceipt,
+    WorkItemTransitionRequest,
 };
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params, params_from_iter};
 use thiserror::Error;
@@ -158,7 +171,7 @@ impl SqliteBoardStore {
                     ON board_checkpoint_attachments(project_id, work_item_id, attached_at);",
             )
             .map_err(StoreError::Sqlite)?;
-        create_execution_workspace_storage(&connection)?;
+        create_auxiliary_storage(&connection)?;
         migrate_agent_profile_columns(&connection)?;
         migrate_work_item_columns(&connection)?;
         set_schema_version(&connection)?;
@@ -312,6 +325,1366 @@ impl SqliteBoardStore {
             },
             execution_workspace,
         })
+    }
+
+    /// Persist one immutable Control graph revision.
+    ///
+    /// Returns `true` when inserted and `false` for an identical retry.
+    ///
+    /// # Errors
+    ///
+    /// Returns a bounded validation, conflicting-revision, serialization, or storage error.
+    pub fn save_control_graph_revision(
+        &mut self,
+        graph: &ControlGraphRevision,
+    ) -> Result<bool, StoreError> {
+        graph.validate().map_err(|_| StoreError::InvalidRequest)?;
+        let definition = serde_json::to_string(graph).map_err(StoreError::Json)?;
+        let inserted = self
+            .connection
+            .execute(
+                "INSERT OR IGNORE INTO board_control_graph_revisions
+                   (graph_id, revision_id, definition_json)
+                 VALUES (?1, ?2, ?3)",
+                params![graph.graph_id, graph.revision_id, definition],
+            )
+            .map_err(StoreError::Sqlite)?;
+        if inserted == 1 {
+            return Ok(true);
+        }
+        let existing: String = self
+            .connection
+            .query_row(
+                "SELECT definition_json
+                 FROM board_control_graph_revisions
+                 WHERE graph_id = ?1 AND revision_id = ?2",
+                params![graph.graph_id, graph.revision_id],
+                |row| row.get(0),
+            )
+            .map_err(StoreError::Sqlite)?;
+        if existing == definition {
+            Ok(false)
+        } else {
+            Err(StoreError::GraphRevisionAlreadyExists)
+        }
+    }
+
+    /// Ensure the small built-in graph catalog is available for project selection.
+    ///
+    /// Returns the number of newly inserted immutable revisions.
+    ///
+    /// # Errors
+    ///
+    /// Returns a validation, conflicting-revision, serialization, or storage error.
+    pub fn ensure_builtin_control_graphs(&mut self) -> Result<usize, StoreError> {
+        let mut inserted = 0;
+        for graph in builtin_control_graphs() {
+            inserted += usize::from(self.save_control_graph_revision(&graph)?);
+        }
+        Ok(inserted)
+    }
+
+    /// Load every immutable Control graph revision in stable identity order.
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage or corrupt-state error.
+    pub fn load_control_graph_revisions(&self) -> Result<Vec<ControlGraphRevision>, StoreError> {
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT definition_json
+                 FROM board_control_graph_revisions
+                 ORDER BY graph_id, revision_id",
+            )
+            .map_err(StoreError::Sqlite)?;
+        let rows = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(StoreError::Sqlite)?;
+        let mut graphs = Vec::new();
+        for row in rows {
+            let definition = row.map_err(StoreError::Sqlite)?;
+            let graph: ControlGraphRevision =
+                serde_json::from_str(&definition).map_err(StoreError::Json)?;
+            graph
+                .validate()
+                .map_err(|_| StoreError::CorruptState("invalid Control graph revision"))?;
+            graphs.push(graph);
+        }
+        Ok(graphs)
+    }
+
+    /// Load every Board-local Graph canvas layout in stable Graph identity order.
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage, serialization, or corrupt-state error.
+    pub fn load_graph_canvas_layouts(&self) -> Result<Vec<GraphCanvasLayout>, StoreError> {
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT layout_json
+                 FROM board_graph_canvas_layouts
+                 ORDER BY graph_id",
+            )
+            .map_err(StoreError::Sqlite)?;
+        let rows = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(StoreError::Sqlite)?;
+        let mut layouts = Vec::new();
+        for row in rows {
+            let layout: GraphCanvasLayout = serde_json::from_str(&row.map_err(StoreError::Sqlite)?)
+                .map_err(StoreError::Json)?;
+            layout
+                .validate()
+                .map_err(|_| StoreError::CorruptState("invalid Graph canvas layout"))?;
+            layouts.push(layout);
+        }
+        Ok(layouts)
+    }
+
+    /// Save presentation-only node positions without changing a Graph revision.
+    ///
+    /// # Errors
+    ///
+    /// Returns a validation, serialization, or storage error.
+    pub fn save_graph_canvas_layout(
+        &mut self,
+        layout: &GraphCanvasLayout,
+    ) -> Result<(), StoreError> {
+        layout.validate().map_err(|_| StoreError::InvalidRequest)?;
+        let layout_json = serde_json::to_string(layout).map_err(StoreError::Json)?;
+        self.connection
+            .execute(
+                "INSERT INTO board_graph_canvas_layouts (graph_id, layout_json, updated_at)
+                 VALUES (?1, ?2, CURRENT_TIMESTAMP)
+                 ON CONFLICT(graph_id) DO UPDATE SET
+                   layout_json = excluded.layout_json,
+                   updated_at = CURRENT_TIMESTAMP",
+                params![layout.graph_id, layout_json],
+            )
+            .map_err(StoreError::Sqlite)?;
+        Ok(())
+    }
+
+    /// Persist one immutable, project-independent Orchestration Blueprint revision.
+    ///
+    /// Returns `true` when inserted and `false` for an identical retry.
+    ///
+    /// # Errors
+    ///
+    /// Returns a validation, conflicting-revision, serialization, or storage error.
+    pub fn save_orchestration_blueprint_revision(
+        &mut self,
+        revision: &OrchestrationBlueprintRevision,
+    ) -> Result<bool, StoreError> {
+        revision
+            .validate()
+            .map_err(|_| StoreError::InvalidRequest)?;
+        let definition = serde_json::to_string(revision).map_err(StoreError::Json)?;
+        let inserted = self
+            .connection
+            .execute(
+                "INSERT OR IGNORE INTO board_orchestration_blueprint_revisions
+                   (blueprint_id, revision_id, definition_json)
+                 VALUES (?1, ?2, ?3)",
+                params![revision.blueprint_id, revision.revision_id, definition],
+            )
+            .map_err(StoreError::Sqlite)?;
+        if inserted == 1 {
+            return Ok(true);
+        }
+        let existing: String = self
+            .connection
+            .query_row(
+                "SELECT definition_json
+                 FROM board_orchestration_blueprint_revisions
+                 WHERE blueprint_id = ?1 AND revision_id = ?2",
+                params![revision.blueprint_id, revision.revision_id],
+                |row| row.get(0),
+            )
+            .map_err(StoreError::Sqlite)?;
+        if existing == definition {
+            Ok(false)
+        } else {
+            Err(StoreError::BlueprintRevisionAlreadyExists)
+        }
+    }
+
+    /// Ensure the portable built-in Blueprint catalog is available idempotently.
+    ///
+    /// # Errors
+    ///
+    /// Returns a validation, conflicting-revision, serialization, or storage error.
+    pub fn ensure_builtin_orchestration_blueprints(&mut self) -> Result<usize, StoreError> {
+        let mut inserted = 0;
+        for revision in builtin_orchestration_blueprints() {
+            inserted += usize::from(self.save_orchestration_blueprint_revision(&revision)?);
+        }
+        Ok(inserted)
+    }
+
+    /// Load every immutable Orchestration Blueprint revision in stable order.
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage or corrupt-state error.
+    pub fn load_orchestration_blueprint_revisions(
+        &self,
+    ) -> Result<Vec<OrchestrationBlueprintRevision>, StoreError> {
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT definition_json
+                 FROM board_orchestration_blueprint_revisions
+                 ORDER BY blueprint_id, revision_id",
+            )
+            .map_err(StoreError::Sqlite)?;
+        let rows = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(StoreError::Sqlite)?;
+        let mut revisions = Vec::new();
+        for row in rows {
+            let definition = row.map_err(StoreError::Sqlite)?;
+            let revision: OrchestrationBlueprintRevision =
+                serde_json::from_str(&definition).map_err(StoreError::Json)?;
+            revision.validate().map_err(|_| {
+                StoreError::CorruptState("invalid Orchestration Blueprint revision")
+            })?;
+            revisions.push(revision);
+        }
+        Ok(revisions)
+    }
+
+    /// Atomically record one accepted Blueprint Application and its concrete binding.
+    ///
+    /// This records Board intent only. It does not start a Runner or change Work item state.
+    /// Identical retries are idempotent.
+    ///
+    /// # Errors
+    ///
+    /// Returns a validation, stale-preview, conflicting-identity, or storage error.
+    pub fn accept_blueprint_application(
+        &mut self,
+        application: &BlueprintApplication,
+        runtime_binding: &BlueprintRuntimeBinding,
+    ) -> Result<BlueprintApplicationReceipt, StoreError> {
+        validate_blueprint_application(application, runtime_binding)?;
+        let workspace = canonical_execution_workspace(&runtime_binding.execution_workspace)?;
+        let pins = canonical_blueprint_note_pins(&runtime_binding.approach_notes)?;
+        let pins_json = serde_json::to_string(&pins).map_err(StoreError::Json)?;
+
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(StoreError::Sqlite)?;
+        let expected = BlueprintApplicationReceipt {
+            application: application.clone(),
+            runtime_binding: BlueprintRuntimeBinding {
+                execution_workspace: workspace.clone(),
+                approach_notes: pins.clone(),
+                ..runtime_binding.clone()
+            },
+            created: false,
+        };
+        if let Some(existing) =
+            load_blueprint_application_receipt(&transaction, &application.application_id)?
+        {
+            if existing != expected {
+                return Err(StoreError::BlueprintApplicationAlreadyExists);
+            }
+            transaction.commit().map_err(StoreError::Sqlite)?;
+            return Ok(existing);
+        }
+        validate_blueprint_application_facts(
+            &transaction,
+            application,
+            runtime_binding,
+            &workspace,
+            &pins,
+        )?;
+
+        let application_inserted = transaction
+            .execute(
+                "INSERT OR IGNORE INTO board_blueprint_applications
+                   (application_id, blueprint_id, revision_id, entry_node_id, project_id, work_item_id)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    application.application_id,
+                    application.blueprint_id,
+                    application.revision_id,
+                    application.entry_node_id,
+                    application.project_id,
+                    application.work_item_id,
+                ],
+            )
+            .map_err(StoreError::Sqlite)?;
+        let binding_inserted = transaction
+            .execute(
+                "INSERT OR IGNORE INTO board_blueprint_runtime_bindings
+                   (application_id, project_id, work_item_id, agent_profile_id,
+                    execution_workspace_kind, execution_workspace_location, approach_notes_json)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    runtime_binding.application_id,
+                    runtime_binding.project_id,
+                    runtime_binding.work_item_id,
+                    runtime_binding.agent_profile_id,
+                    workspace.kind.as_str(),
+                    workspace.location,
+                    pins_json,
+                ],
+            )
+            .map_err(StoreError::Sqlite)?;
+
+        if application_inserted != 1 || binding_inserted != 1 {
+            return Err(StoreError::ConcurrentChange);
+        }
+        transaction.commit().map_err(StoreError::Sqlite)?;
+        Ok(BlueprintApplicationReceipt {
+            application: application.clone(),
+            runtime_binding: BlueprintRuntimeBinding {
+                execution_workspace: workspace,
+                approach_notes: pins,
+                ..runtime_binding.clone()
+            },
+            created: true,
+        })
+    }
+
+    /// Load accepted Blueprint Applications and pinned Runtime Bindings in stable order.
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage or corrupt-state error.
+    pub fn load_blueprint_applications(
+        &self,
+    ) -> Result<Vec<BlueprintApplicationReceipt>, StoreError> {
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT application_id
+                 FROM board_blueprint_applications
+                 ORDER BY created_at, application_id",
+            )
+            .map_err(StoreError::Sqlite)?;
+        let rows = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(StoreError::Sqlite)?;
+        let mut applications = Vec::new();
+        for row in rows {
+            let application_id = row.map_err(StoreError::Sqlite)?;
+            applications.push(
+                load_blueprint_application_receipt(&self.connection, &application_id)?.ok_or(
+                    StoreError::CorruptState("Blueprint Application lost its Runtime Binding"),
+                )?,
+            );
+        }
+        Ok(applications)
+    }
+
+    /// Persist one immutable portfolio orchestration revision.
+    ///
+    /// Returns `true` when inserted and `false` for an identical retry.
+    ///
+    /// # Errors
+    ///
+    /// Returns a bounded validation, conflicting-revision, serialization, or storage error.
+    pub fn save_portfolio_orchestration_revision(
+        &mut self,
+        revision: &PortfolioOrchestrationRevision,
+    ) -> Result<bool, StoreError> {
+        revision
+            .validate()
+            .map_err(|_| StoreError::InvalidRequest)?;
+        let definition = serde_json::to_string(revision).map_err(StoreError::Json)?;
+        let inserted = self
+            .connection
+            .execute(
+                "INSERT OR IGNORE INTO board_portfolio_orchestration_revisions
+                   (orchestration_id, revision_id, definition_json)
+                 VALUES (?1, ?2, ?3)",
+                params![revision.orchestration_id, revision.revision_id, definition],
+            )
+            .map_err(StoreError::Sqlite)?;
+        if inserted == 1 {
+            return Ok(true);
+        }
+        let existing: String = self
+            .connection
+            .query_row(
+                "SELECT definition_json
+                 FROM board_portfolio_orchestration_revisions
+                 WHERE orchestration_id = ?1 AND revision_id = ?2",
+                params![revision.orchestration_id, revision.revision_id],
+                |row| row.get(0),
+            )
+            .map_err(StoreError::Sqlite)?;
+        if existing == definition {
+            Ok(false)
+        } else {
+            Err(StoreError::PortfolioOrchestrationRevisionAlreadyExists)
+        }
+    }
+
+    /// Ensure the built-in portfolio orchestration is available idempotently.
+    ///
+    /// # Errors
+    ///
+    /// Returns a validation, conflicting-revision, serialization, or storage error.
+    pub fn ensure_builtin_portfolio_orchestrations(&mut self) -> Result<usize, StoreError> {
+        let mut inserted = 0;
+        for revision in builtin_portfolio_orchestrations() {
+            inserted += usize::from(self.save_portfolio_orchestration_revision(&revision)?);
+        }
+        Ok(inserted)
+    }
+
+    /// Load every immutable portfolio orchestration revision in stable order.
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage or corrupt-state error.
+    pub fn load_portfolio_orchestration_revisions(
+        &self,
+    ) -> Result<Vec<PortfolioOrchestrationRevision>, StoreError> {
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT definition_json
+                 FROM board_portfolio_orchestration_revisions
+                 ORDER BY orchestration_id, revision_id",
+            )
+            .map_err(StoreError::Sqlite)?;
+        let rows = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(StoreError::Sqlite)?;
+        let mut revisions = Vec::new();
+        for row in rows {
+            let definition = row.map_err(StoreError::Sqlite)?;
+            let revision: PortfolioOrchestrationRevision =
+                serde_json::from_str(&definition).map_err(StoreError::Json)?;
+            revision.validate().map_err(|_| {
+                StoreError::CorruptState("invalid Portfolio orchestration revision")
+            })?;
+            revisions.push(revision);
+        }
+        Ok(revisions)
+    }
+
+    /// Load the most recently created Run for one immutable Portfolio revision.
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage or corrupt-state error.
+    pub fn load_latest_portfolio_run(
+        &self,
+        orchestration_id: &str,
+        revision_id: &str,
+    ) -> Result<Option<PortfolioRun>, StoreError> {
+        self.connection
+            .query_row(
+                "SELECT run_id, orchestration_id, revision_id, current_node_id,
+                        status, completed_steps, next_tick_at_epoch_seconds
+                 FROM board_portfolio_runs
+                 WHERE orchestration_id = ?1 AND revision_id = ?2
+                 ORDER BY rowid DESC
+                 LIMIT 1",
+                params![orchestration_id, revision_id],
+                portfolio_run_from_row,
+            )
+            .optional()
+            .map_err(StoreError::Sqlite)?
+            .map_or(Ok(None), |run| run.map(Some))
+    }
+
+    /// Load the effective automatic-tick control for one Portfolio revision.
+    /// Missing runtime state derives from the immutable revision schedule.
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage error.
+    pub fn load_portfolio_schedule_control(
+        &self,
+        revision: &PortfolioOrchestrationRevision,
+    ) -> Result<PortfolioScheduleControl, StoreError> {
+        self.connection
+            .query_row(
+                "SELECT automatic_ticks_enabled
+                 FROM board_portfolio_schedule_controls
+                 WHERE orchestration_id = ?1 AND revision_id = ?2",
+                params![revision.orchestration_id, revision.revision_id],
+                |row| {
+                    Ok(PortfolioScheduleControl {
+                        orchestration_id: revision.orchestration_id.clone(),
+                        revision_id: revision.revision_id.clone(),
+                        automatic_ticks_enabled: row.get(0)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(StoreError::Sqlite)
+            .map(|stored| {
+                stored.unwrap_or_else(|| PortfolioScheduleControl::from_revision(revision))
+            })
+    }
+
+    /// Optimistically pause or resume automatic ticks without changing a Run.
+    ///
+    /// # Errors
+    ///
+    /// Returns a validation, concurrent-change, relationship, or storage error.
+    pub fn save_portfolio_schedule_control(
+        &mut self,
+        request: &PortfolioScheduleControlSaveRequest,
+    ) -> Result<PortfolioScheduleControlSaveReceipt, StoreError> {
+        if request.expected.orchestration_id != request.target.orchestration_id
+            || request.expected.revision_id != request.target.revision_id
+        {
+            return Err(StoreError::InvalidRequest);
+        }
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(StoreError::Sqlite)?;
+        let definition: Option<String> = transaction
+            .query_row(
+                "SELECT definition_json
+                 FROM board_portfolio_orchestration_revisions
+                 WHERE orchestration_id = ?1 AND revision_id = ?2",
+                params![request.target.orchestration_id, request.target.revision_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(StoreError::Sqlite)?;
+        let Some(definition) = definition else {
+            return Err(StoreError::InvalidRequest);
+        };
+        let revision: PortfolioOrchestrationRevision =
+            serde_json::from_str(&definition).map_err(StoreError::Json)?;
+        if request.target.automatic_ticks_enabled && revision.schedule.interval_seconds().is_none()
+        {
+            return Err(StoreError::InvalidRequest);
+        }
+        let stored: Option<bool> = transaction
+            .query_row(
+                "SELECT automatic_ticks_enabled
+                 FROM board_portfolio_schedule_controls
+                 WHERE orchestration_id = ?1 AND revision_id = ?2",
+                params![request.target.orchestration_id, request.target.revision_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(StoreError::Sqlite)?;
+        let previous = stored.map_or_else(
+            || PortfolioScheduleControl::from_revision(&revision),
+            |automatic_ticks_enabled| PortfolioScheduleControl {
+                orchestration_id: request.target.orchestration_id.clone(),
+                revision_id: request.target.revision_id.clone(),
+                automatic_ticks_enabled,
+            },
+        );
+        if previous != request.expected {
+            return Err(StoreError::ConcurrentChange);
+        }
+        let changed = previous != request.target;
+        if changed {
+            transaction
+                .execute(
+                    "INSERT INTO board_portfolio_schedule_controls
+                       (orchestration_id, revision_id, automatic_ticks_enabled)
+                     VALUES (?1, ?2, ?3)
+                     ON CONFLICT(orchestration_id, revision_id) DO UPDATE SET
+                       automatic_ticks_enabled = excluded.automatic_ticks_enabled,
+                       updated_at = CURRENT_TIMESTAMP",
+                    params![
+                        request.target.orchestration_id,
+                        request.target.revision_id,
+                        request.target.automatic_ticks_enabled,
+                    ],
+                )
+                .map_err(StoreError::Sqlite)?;
+        }
+        transaction.commit().map_err(StoreError::Sqlite)?;
+        Ok(PortfolioScheduleControlSaveReceipt {
+            previous,
+            resulting: request.target.clone(),
+            changed,
+        })
+    }
+
+    /// Load every append-only step for one Portfolio Run.
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage or corrupt-state error.
+    pub fn load_portfolio_run_steps(
+        &self,
+        run_id: &str,
+    ) -> Result<Vec<PortfolioRunStep>, StoreError> {
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT run_id, sequence, node_id, signal, destination_node_id,
+                        selected_project_id, recorded_at_epoch_seconds
+                 FROM board_portfolio_run_steps
+                 WHERE run_id = ?1
+                 ORDER BY sequence",
+            )
+            .map_err(StoreError::Sqlite)?;
+        let rows = statement
+            .query_map([run_id], portfolio_run_step_from_row)
+            .map_err(StoreError::Sqlite)?;
+        let mut steps = Vec::new();
+        for row in rows {
+            steps.push(row.map_err(StoreError::Sqlite)??);
+        }
+        Ok(steps)
+    }
+
+    /// Atomically persist one optimistic Portfolio Run transition and its step.
+    ///
+    /// `observed_latest` is the latest Run the caller used when deciding the tick.
+    /// Comparing it inside the immediate transaction prevents the desktop and an
+    /// external scheduler from both advancing, or both restarting, one revision.
+    ///
+    /// # Errors
+    ///
+    /// Returns a concurrent-change, relationship, or storage error.
+    pub fn record_portfolio_tick(
+        &mut self,
+        observed_latest: Option<&PortfolioRun>,
+        resulting: &PortfolioRun,
+        step: &PortfolioRunStep,
+    ) -> Result<(), StoreError> {
+        if step.run_id != resulting.run_id || step.sequence != resulting.completed_steps {
+            return Err(StoreError::InvalidRequest);
+        }
+        if observed_latest.is_some_and(|latest| {
+            latest.orchestration_id != resulting.orchestration_id
+                || latest.revision_id != resulting.revision_id
+                || (latest.run_id != resulting.run_id
+                    && latest.status != PortfolioRunStatus::Completed)
+        }) {
+            return Err(StoreError::InvalidRequest);
+        }
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(StoreError::Sqlite)?;
+        let latest = transaction
+            .query_row(
+                "SELECT run_id, orchestration_id, revision_id, current_node_id,
+                        status, completed_steps, next_tick_at_epoch_seconds
+                 FROM board_portfolio_runs
+                 WHERE orchestration_id = ?1 AND revision_id = ?2
+                 ORDER BY rowid DESC
+                 LIMIT 1",
+                params![resulting.orchestration_id, resulting.revision_id],
+                portfolio_run_from_row,
+            )
+            .optional()
+            .map_err(StoreError::Sqlite)?
+            .transpose()?;
+        if latest.as_ref() != observed_latest {
+            return Err(StoreError::ConcurrentChange);
+        }
+        let stored = transaction
+            .query_row(
+                "SELECT run_id, orchestration_id, revision_id, current_node_id,
+                        status, completed_steps, next_tick_at_epoch_seconds
+                 FROM board_portfolio_runs WHERE run_id = ?1",
+                [&resulting.run_id],
+                portfolio_run_from_row,
+            )
+            .optional()
+            .map_err(StoreError::Sqlite)?
+            .transpose()?;
+        let expected_same_run = observed_latest
+            .filter(|latest| latest.run_id == resulting.run_id)
+            .cloned();
+        if stored != expected_same_run {
+            return Err(StoreError::ConcurrentChange);
+        }
+        transaction
+            .execute(
+                "INSERT INTO board_portfolio_runs
+                   (run_id, orchestration_id, revision_id, current_node_id, status,
+                    completed_steps, next_tick_at_epoch_seconds)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                 ON CONFLICT(run_id) DO UPDATE SET
+                   current_node_id = excluded.current_node_id,
+                   status = excluded.status,
+                   completed_steps = excluded.completed_steps,
+                   next_tick_at_epoch_seconds = excluded.next_tick_at_epoch_seconds,
+                   updated_at = CURRENT_TIMESTAMP",
+                params![
+                    resulting.run_id,
+                    resulting.orchestration_id,
+                    resulting.revision_id,
+                    resulting.current_node_id,
+                    resulting.status.as_str(),
+                    resulting.completed_steps,
+                    resulting.next_tick_at_epoch_seconds,
+                ],
+            )
+            .map_err(StoreError::Sqlite)?;
+        transaction
+            .execute(
+                "INSERT INTO board_portfolio_run_steps
+                   (run_id, sequence, node_id, signal, destination_node_id,
+                    selected_project_id, recorded_at_epoch_seconds)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    step.run_id,
+                    step.sequence,
+                    step.node_id,
+                    step.signal.map(PortfolioSignal::as_str),
+                    step.destination_node_id,
+                    step.selected_project_id,
+                    step.recorded_at_epoch_seconds,
+                ],
+            )
+            .map_err(StoreError::Sqlite)?;
+        transaction.commit().map_err(StoreError::Sqlite)
+    }
+
+    /// Atomically select one persisted Graph revision and entry for a Board project.
+    ///
+    /// # Errors
+    ///
+    /// Returns a bounded project, graph, validation, concurrent-change, or storage error.
+    pub fn save_project_graph_binding(
+        &mut self,
+        request: &ProjectGraphBindingSaveRequest,
+    ) -> Result<ProjectGraphBindingSaveReceipt, StoreError> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(StoreError::Sqlite)?;
+        let project_exists: bool = transaction
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM board_projects WHERE id = ?1)",
+                [&request.target.project_id],
+                |row| row.get(0),
+            )
+            .map_err(StoreError::Sqlite)?;
+        if !project_exists {
+            return Err(StoreError::ProjectNotFound);
+        }
+        let definition: Option<String> = transaction
+            .query_row(
+                "SELECT definition_json
+                 FROM board_control_graph_revisions
+                 WHERE graph_id = ?1 AND revision_id = ?2",
+                params![request.target.graph_id, request.target.revision_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(StoreError::Sqlite)?;
+        let Some(definition) = definition else {
+            return Err(StoreError::GraphRevisionNotFound);
+        };
+        let graph: ControlGraphRevision =
+            serde_json::from_str(&definition).map_err(StoreError::Json)?;
+        graph
+            .validate()
+            .map_err(|_| StoreError::CorruptState("invalid Control graph revision"))?;
+        request
+            .target
+            .validate_against(&graph)
+            .map_err(|_| StoreError::InvalidRequest)?;
+
+        let previous = transaction
+            .query_row(
+                "SELECT project_id, graph_id, revision_id, entry_id
+                 FROM board_project_graph_bindings
+                 WHERE project_id = ?1",
+                [&request.target.project_id],
+                |row| {
+                    Ok(ProjectGraphBinding {
+                        project_id: row.get(0)?,
+                        graph_id: row.get(1)?,
+                        revision_id: row.get(2)?,
+                        entry_id: row.get(3)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(StoreError::Sqlite)?;
+        if previous != request.expected {
+            return Err(StoreError::ConcurrentChange);
+        }
+        let changed = previous.as_ref() != Some(&request.target);
+        if changed {
+            transaction
+                .execute(
+                    "INSERT INTO board_project_graph_bindings
+                       (project_id, graph_id, revision_id, entry_id)
+                     VALUES (?1, ?2, ?3, ?4)
+                     ON CONFLICT(project_id) DO UPDATE SET
+                       graph_id = excluded.graph_id,
+                       revision_id = excluded.revision_id,
+                       entry_id = excluded.entry_id",
+                    params![
+                        request.target.project_id,
+                        request.target.graph_id,
+                        request.target.revision_id,
+                        request.target.entry_id
+                    ],
+                )
+                .map_err(StoreError::Sqlite)?;
+        }
+        transaction.commit().map_err(StoreError::Sqlite)?;
+        Ok(ProjectGraphBindingSaveReceipt {
+            previous,
+            resulting: request.target.clone(),
+            changed,
+        })
+    }
+
+    /// Load the selected Graph revision and entry for every configured project.
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage error.
+    pub fn load_project_graph_bindings(&self) -> Result<Vec<ProjectGraphBinding>, StoreError> {
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT project_id, graph_id, revision_id, entry_id
+                 FROM board_project_graph_bindings
+                 ORDER BY project_id",
+            )
+            .map_err(StoreError::Sqlite)?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok(ProjectGraphBinding {
+                    project_id: row.get(0)?,
+                    graph_id: row.get(1)?,
+                    revision_id: row.get(2)?,
+                    entry_id: row.get(3)?,
+                })
+            })
+            .map_err(StoreError::Sqlite)?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StoreError::Sqlite)
+    }
+
+    /// Record one pending candidate revision without publishing it to the Graph catalog.
+    ///
+    /// # Errors
+    ///
+    /// Returns a bounded validation, relationship, duplicate, concurrent-change,
+    /// serialization, or storage error.
+    pub fn save_graph_rewrite_proposal(
+        &mut self,
+        proposal: &GraphRewriteProposal,
+    ) -> Result<GraphRewriteProposal, StoreError> {
+        validate_graph_rewrite_proposal(proposal)?;
+        if proposal.status != GraphRewriteProposalStatus::Pending {
+            return Err(StoreError::InvalidRequest);
+        }
+        let definition = serde_json::to_string(proposal).map_err(StoreError::Json)?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(StoreError::Sqlite)?;
+        let current = transaction
+            .query_row(
+                "SELECT project_id, graph_id, revision_id, entry_id
+                 FROM board_project_graph_bindings
+                 WHERE project_id = ?1",
+                [&proposal.project_id],
+                |row| {
+                    Ok(ProjectGraphBinding {
+                        project_id: row.get(0)?,
+                        graph_id: row.get(1)?,
+                        revision_id: row.get(2)?,
+                        entry_id: row.get(3)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(StoreError::Sqlite)?
+            .ok_or(StoreError::ProjectGraphBindingNotFound)?;
+        if current != proposal.source_binding {
+            return Err(StoreError::ConcurrentChange);
+        }
+        validate_graph_rewrite_relationships(&transaction, proposal)?;
+        let candidate_exists: bool = transaction
+            .query_row(
+                "SELECT EXISTS(
+                   SELECT 1 FROM board_control_graph_revisions
+                   WHERE graph_id = ?1 AND revision_id = ?2
+                 )",
+                params![
+                    proposal.candidate_graph.graph_id,
+                    proposal.candidate_graph.revision_id
+                ],
+                |row| row.get(0),
+            )
+            .map_err(StoreError::Sqlite)?;
+        if candidate_exists {
+            return Err(StoreError::GraphRevisionAlreadyExists);
+        }
+        let inserted = transaction
+            .execute(
+                "INSERT OR IGNORE INTO board_graph_rewrite_proposals
+                   (proposal_id, project_id, status, definition_json)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    proposal.proposal_id,
+                    proposal.project_id,
+                    proposal.status.as_str(),
+                    definition
+                ],
+            )
+            .map_err(StoreError::Sqlite)?;
+        if inserted != 1 {
+            return Err(StoreError::GraphRewriteProposalAlreadyExists);
+        }
+        transaction.commit().map_err(StoreError::Sqlite)?;
+        Ok(proposal.clone())
+    }
+
+    /// Load every Graph rewrite proposal for one project in creation order.
+    ///
+    /// # Errors
+    ///
+    /// Returns a bounded validation, storage, serialization, or corrupt-state error.
+    pub fn load_project_graph_rewrite_proposals(
+        &self,
+        project_id: &str,
+    ) -> Result<Vec<GraphRewriteProposal>, StoreError> {
+        validate_stable_identifier(project_id)?;
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT status, definition_json
+                 FROM board_graph_rewrite_proposals
+                 WHERE project_id = ?1
+                 ORDER BY created_at, proposal_id",
+            )
+            .map_err(StoreError::Sqlite)?;
+        let rows = statement
+            .query_map([project_id], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(StoreError::Sqlite)?;
+        let mut proposals = Vec::new();
+        for row in rows {
+            let (status, definition) = row.map_err(StoreError::Sqlite)?;
+            let proposal: GraphRewriteProposal =
+                serde_json::from_str(&definition).map_err(StoreError::Json)?;
+            validate_graph_rewrite_proposal(&proposal)
+                .map_err(|_| StoreError::CorruptState("invalid Graph rewrite proposal"))?;
+            if proposal.project_id != project_id || proposal.status.as_str() != status {
+                return Err(StoreError::CorruptState(
+                    "Graph rewrite proposal columns do not match its definition",
+                ));
+            }
+            proposals.push(proposal);
+        }
+        Ok(proposals)
+    }
+
+    /// Atomically approve or reject one pending Graph rewrite proposal.
+    ///
+    /// Approval publishes the candidate revision and selects it for future work.
+    /// Existing Work item graph positions remain pinned to their recorded revision.
+    /// Rejection publishes nothing and preserves the current Project binding.
+    ///
+    /// # Errors
+    ///
+    /// Returns a bounded validation, lookup, already-decided, concurrent-change,
+    /// conflicting-revision, serialization, corrupt-state, or storage error.
+    pub fn decide_graph_rewrite_proposal(
+        &mut self,
+        request: &GraphRewriteDecisionRequest,
+    ) -> Result<GraphRewriteDecisionReceipt, StoreError> {
+        validate_stable_identifier(&request.proposal_id)?;
+        validate_stable_identifier(&request.project_id)?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(StoreError::Sqlite)?;
+        let stored: Option<(String, String)> = transaction
+            .query_row(
+                "SELECT status, definition_json
+                 FROM board_graph_rewrite_proposals
+                 WHERE proposal_id = ?1 AND project_id = ?2",
+                params![request.proposal_id, request.project_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(StoreError::Sqlite)?;
+        let Some((stored_status, definition)) = stored else {
+            return Err(StoreError::GraphRewriteProposalNotFound);
+        };
+        let mut proposal: GraphRewriteProposal =
+            serde_json::from_str(&definition).map_err(StoreError::Json)?;
+        validate_graph_rewrite_proposal(&proposal)
+            .map_err(|_| StoreError::CorruptState("invalid Graph rewrite proposal"))?;
+        if proposal.project_id != request.project_id
+            || proposal.proposal_id != request.proposal_id
+            || proposal.status.as_str() != stored_status
+        {
+            return Err(StoreError::CorruptState(
+                "Graph rewrite proposal columns do not match its definition",
+            ));
+        }
+        if proposal.status != GraphRewriteProposalStatus::Pending {
+            return Err(StoreError::GraphRewriteProposalAlreadyDecided);
+        }
+        validate_graph_rewrite_relationships(&transaction, &proposal).map_err(
+            |error| match error {
+                StoreError::InvalidRequest | StoreError::AgentProfileNotFound => {
+                    StoreError::CorruptState("Graph rewrite proposal is not a bounded rewrite")
+                }
+                error => error,
+            },
+        )?;
+
+        let previous_binding = transaction
+            .query_row(
+                "SELECT project_id, graph_id, revision_id, entry_id
+                 FROM board_project_graph_bindings
+                 WHERE project_id = ?1",
+                [&request.project_id],
+                |row| {
+                    Ok(ProjectGraphBinding {
+                        project_id: row.get(0)?,
+                        graph_id: row.get(1)?,
+                        revision_id: row.get(2)?,
+                        entry_id: row.get(3)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(StoreError::Sqlite)?
+            .ok_or(StoreError::ProjectGraphBindingNotFound)?;
+        let (resulting_binding, published) = match request.decision {
+            GraphRewriteDecision::Approve => {
+                proposal.status = GraphRewriteProposalStatus::Approved;
+                (
+                    publish_graph_rewrite_candidate(&transaction, &proposal, &previous_binding)?,
+                    true,
+                )
+            }
+            GraphRewriteDecision::Reject => {
+                proposal.status = GraphRewriteProposalStatus::Rejected;
+                (previous_binding.clone(), false)
+            }
+        };
+        let decided_definition = serde_json::to_string(&proposal).map_err(StoreError::Json)?;
+        let changed = transaction
+            .execute(
+                "UPDATE board_graph_rewrite_proposals
+                 SET status = ?1, definition_json = ?2, decided_at = CURRENT_TIMESTAMP
+                 WHERE proposal_id = ?3 AND project_id = ?4 AND status = 'pending'",
+                params![
+                    proposal.status.as_str(),
+                    decided_definition,
+                    request.proposal_id,
+                    request.project_id
+                ],
+            )
+            .map_err(StoreError::Sqlite)?;
+        if changed != 1 {
+            return Err(StoreError::ConcurrentChange);
+        }
+        transaction.commit().map_err(StoreError::Sqlite)?;
+        Ok(GraphRewriteDecisionReceipt {
+            proposal,
+            previous_binding,
+            resulting_binding,
+            published,
+        })
+    }
+
+    /// Evaluate and atomically record one Work item's next declared Control route.
+    ///
+    /// The first decision pins the Work item to its project's current Graph revision
+    /// and entry. Later project binding changes do not affect that position.
+    ///
+    /// # Errors
+    ///
+    /// Returns a bounded validation, relationship, route, concurrent-change,
+    /// duplicate-identity, corrupt-state, serialization, or storage error.
+    pub fn record_route_decision(
+        &mut self,
+        request: &RouteDecisionRequest,
+    ) -> Result<RouteDecisionReceipt, StoreError> {
+        validate_route_decision_request(request)?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(StoreError::Sqlite)?;
+
+        let existing = transaction
+            .query_row(
+                &route_decision_select_sql("WHERE decision_id = ?1"),
+                [&request.decision_id],
+                raw_route_decision,
+            )
+            .optional()
+            .map_err(StoreError::Sqlite)?
+            .map(decode_route_decision)
+            .transpose()?;
+        if let Some(decision) = existing {
+            if !route_decision_matches_request(&decision, request) {
+                return Err(StoreError::RouteDecisionAlreadyExists);
+            }
+            let resulting_position = position_after(&decision);
+            transaction.commit().map_err(StoreError::Sqlite)?;
+            return Ok(RouteDecisionReceipt {
+                decision,
+                resulting_position,
+                recorded: false,
+            });
+        }
+
+        let work_item: Option<(String, String)> = transaction
+            .query_row(
+                "SELECT project_id, state FROM board_work_items WHERE id = ?1",
+                [&request.work_item_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(StoreError::Sqlite)?;
+        let Some((stored_project_id, stored_state)) = work_item else {
+            return Err(StoreError::WorkItemNotFound);
+        };
+        if stored_project_id != request.project_id {
+            return Err(StoreError::WorkItemNotFound);
+        }
+        let work_item_state = WorkItemState::try_from(stored_state.as_str())
+            .map_err(|_| StoreError::CorruptState("unknown Work item state"))?;
+        if !matches!(
+            work_item_state,
+            WorkItemState::Todo | WorkItemState::InProgress | WorkItemState::InReview
+        ) {
+            return Err(StoreError::InvalidRequest);
+        }
+
+        let existing_position = transaction
+            .query_row(
+                &graph_position_select_sql("WHERE work_item_id = ?1"),
+                [&request.work_item_id],
+                graph_position_from_row,
+            )
+            .optional()
+            .map_err(StoreError::Sqlite)?;
+        let position = match existing_position {
+            Some(position) => position,
+            None => {
+                initial_graph_position(&transaction, &request.project_id, &request.work_item_id)?
+            }
+        };
+        if position.current_node_id != request.expected_current_node_id {
+            return Err(StoreError::ConcurrentChange);
+        }
+        let graph =
+            load_control_graph_revision(&transaction, &position.graph_id, &position.revision_id)?;
+        let selected = graph
+            .select_route(
+                &position.current_node_id,
+                request.signal,
+                request.proposed_route_id.as_deref(),
+            )
+            .map_err(|_| StoreError::RouteNotSelected)?;
+        let decision = RouteDecision {
+            decision_id: request.decision_id.clone(),
+            project_id: request.project_id.clone(),
+            work_item_id: request.work_item_id.clone(),
+            graph_id: position.graph_id.clone(),
+            revision_id: position.revision_id.clone(),
+            entry_id: position.entry_id.clone(),
+            source_node_id: selected.source_node_id,
+            signal: selected.signal,
+            proposed_route_id: request.proposed_route_id.clone(),
+            route_id: selected.route_id,
+            next_node_id: selected.next_node_id,
+            evidence_refs: request.evidence_refs.clone(),
+        };
+        let resulting_position = position_after(&decision);
+        persist_route_decision(&transaction, &decision, &resulting_position)?;
+        transaction.commit().map_err(StoreError::Sqlite)?;
+        Ok(RouteDecisionReceipt {
+            decision,
+            resulting_position,
+            recorded: true,
+        })
+    }
+
+    /// Load immutable Route decisions for one Work item in recorded order.
+    ///
+    /// # Errors
+    ///
+    /// Returns a bounded validation, storage, serialization, or corrupt-state error.
+    pub fn load_route_decisions(
+        &self,
+        work_item_id: &str,
+    ) -> Result<Vec<RouteDecision>, StoreError> {
+        validate_work_item_reference(work_item_id)?;
+        let sql = route_decision_select_sql("WHERE work_item_id = ?1 ORDER BY rowid");
+        let mut statement = self.connection.prepare(&sql).map_err(StoreError::Sqlite)?;
+        let rows = statement
+            .query_map([work_item_id], raw_route_decision)
+            .map_err(StoreError::Sqlite)?;
+        let mut decisions = Vec::new();
+        for row in rows {
+            decisions.push(decode_route_decision(row.map_err(StoreError::Sqlite)?)?);
+        }
+        Ok(decisions)
+    }
+
+    /// Load immutable Route decisions for one Board project in recorded order.
+    ///
+    /// # Errors
+    ///
+    /// Returns a bounded validation, storage, serialization, or corrupt-state error.
+    pub fn load_project_route_decisions(
+        &self,
+        project_id: &str,
+    ) -> Result<Vec<RouteDecision>, StoreError> {
+        validate_stable_identifier(project_id)?;
+        let sql = route_decision_select_sql("WHERE project_id = ?1 ORDER BY rowid");
+        let mut statement = self.connection.prepare(&sql).map_err(StoreError::Sqlite)?;
+        let rows = statement
+            .query_map([project_id], raw_route_decision)
+            .map_err(StoreError::Sqlite)?;
+        let mut decisions = Vec::new();
+        for row in rows {
+            decisions.push(decode_route_decision(row.map_err(StoreError::Sqlite)?)?);
+        }
+        Ok(decisions)
+    }
+
+    /// Load every Work item's current pinned Graph position.
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage error.
+    pub fn load_work_item_graph_positions(&self) -> Result<Vec<WorkItemGraphPosition>, StoreError> {
+        let sql = graph_position_select_sql("ORDER BY project_id, work_item_id");
+        let mut statement = self.connection.prepare(&sql).map_err(StoreError::Sqlite)?;
+        let rows = statement
+            .query_map([], graph_position_from_row)
+            .map_err(StoreError::Sqlite)?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StoreError::Sqlite)
+    }
+
+    /// Pin a Work item to its project's selected Graph entry and resolve the
+    /// current Agent Loop into a concrete Runner target.
+    ///
+    /// Repeating this operation preserves the existing pinned revision and node.
+    /// It does not create a Run or grant a Core capability.
+    ///
+    /// # Errors
+    ///
+    /// Returns a bounded validation, relationship, missing-binding,
+    /// non-Agent-node, corrupt-state, serialization, or storage error.
+    pub fn prepare_agent_loop_execution_target(
+        &mut self,
+        project_id: &str,
+        work_item_id: &str,
+    ) -> Result<AgentLoopExecutionTarget, StoreError> {
+        validate_stable_identifier(project_id)?;
+        validate_work_item_reference(work_item_id)?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(StoreError::Sqlite)?;
+        let stored_work_item: Option<(String, String)> = transaction
+            .query_row(
+                "SELECT project_id, state FROM board_work_items WHERE id = ?1",
+                [work_item_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(StoreError::Sqlite)?;
+        let Some((stored_project_id, stored_state)) = stored_work_item else {
+            return Err(StoreError::WorkItemNotFound);
+        };
+        if stored_project_id != project_id {
+            return Err(StoreError::WorkItemNotFound);
+        }
+        let work_item_state = WorkItemState::try_from(stored_state.as_str())
+            .map_err(|_| StoreError::CorruptState("unknown Work item state"))?;
+        if !matches!(
+            work_item_state,
+            WorkItemState::Todo | WorkItemState::InProgress | WorkItemState::InReview
+        ) {
+            return Err(StoreError::InvalidRequest);
+        }
+        let existing = transaction
+            .query_row(
+                &graph_position_select_sql("WHERE work_item_id = ?1"),
+                [work_item_id],
+                graph_position_from_row,
+            )
+            .optional()
+            .map_err(StoreError::Sqlite)?;
+        let position = if let Some(position) = existing {
+            if position.project_id != project_id {
+                return Err(StoreError::CorruptState(
+                    "Work item Graph position project differs",
+                ));
+            }
+            position
+        } else {
+            let position = initial_graph_position(&transaction, project_id, work_item_id)?;
+            transaction
+                .execute(
+                    "INSERT INTO board_work_item_graph_positions (
+                       work_item_id, project_id, graph_id, revision_id, entry_id,
+                       current_node_id
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    params![
+                        position.work_item_id,
+                        position.project_id,
+                        position.graph_id,
+                        position.revision_id,
+                        position.entry_id,
+                        position.current_node_id
+                    ],
+                )
+                .map_err(StoreError::Sqlite)?;
+            position
+        };
+        let target = resolve_agent_loop_target(&transaction, &position)?;
+        transaction.commit().map_err(StoreError::Sqlite)?;
+        Ok(target)
+    }
+
+    /// Resolve one Work item's current Agent Loop node into a concrete Runner target.
+    ///
+    /// This returns Board scheduling identity only; Runner must still repeat behavior,
+    /// workspace, approval, and Core capability preflight.
+    ///
+    /// # Errors
+    ///
+    /// Returns a bounded validation, missing-position, non-Agent-node, corrupt-state,
+    /// serialization, or storage error.
+    pub fn load_agent_loop_execution_target(
+        &self,
+        work_item_id: &str,
+    ) -> Result<AgentLoopExecutionTarget, StoreError> {
+        validate_work_item_reference(work_item_id)?;
+        let position = self
+            .connection
+            .query_row(
+                &graph_position_select_sql("WHERE work_item_id = ?1"),
+                [work_item_id],
+                graph_position_from_row,
+            )
+            .optional()
+            .map_err(StoreError::Sqlite)?
+            .ok_or(StoreError::WorkItemGraphPositionNotFound)?;
+        resolve_agent_loop_target(&self.connection, &position)
     }
 
     /// Load the bounded Agent profile catalog used by Board scheduling.
@@ -1375,9 +2748,243 @@ fn create_execution_workspace_storage(connection: &Connection) -> Result<(), Sto
         .map_err(StoreError::Sqlite)
 }
 
+fn create_auxiliary_storage(connection: &Connection) -> Result<(), StoreError> {
+    create_execution_workspace_storage(connection)?;
+    create_control_graph_storage(connection)?;
+    create_portfolio_orchestration_storage(connection)?;
+    create_orchestration_blueprint_storage(connection)
+}
+
+fn create_orchestration_blueprint_storage(connection: &Connection) -> Result<(), StoreError> {
+    connection
+        .execute_batch(
+            "CREATE TABLE IF NOT EXISTS board_orchestration_blueprint_revisions (
+               blueprint_id TEXT NOT NULL,
+               revision_id TEXT NOT NULL,
+               definition_json TEXT NOT NULL,
+               created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+               PRIMARY KEY (blueprint_id, revision_id)
+             );
+             CREATE TABLE IF NOT EXISTS board_blueprint_applications (
+               application_id TEXT PRIMARY KEY,
+               blueprint_id TEXT NOT NULL,
+               revision_id TEXT NOT NULL,
+               entry_node_id TEXT NOT NULL,
+               project_id TEXT NOT NULL,
+               work_item_id TEXT NOT NULL,
+               created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+               FOREIGN KEY (blueprint_id, revision_id)
+                 REFERENCES board_orchestration_blueprint_revisions(blueprint_id, revision_id),
+               FOREIGN KEY (project_id) REFERENCES board_projects(id) ON DELETE CASCADE,
+               FOREIGN KEY (work_item_id) REFERENCES board_work_items(id) ON DELETE CASCADE
+             );
+             CREATE TABLE IF NOT EXISTS board_blueprint_runtime_bindings (
+               application_id TEXT PRIMARY KEY,
+               project_id TEXT NOT NULL,
+               work_item_id TEXT NOT NULL,
+               agent_profile_id TEXT NOT NULL,
+               execution_workspace_kind TEXT NOT NULL CHECK (
+                 execution_workspace_kind IN ('bundled_sample', 'local_directory')
+               ),
+               execution_workspace_location TEXT,
+               approach_notes_json TEXT NOT NULL,
+               created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+               FOREIGN KEY (application_id)
+                 REFERENCES board_blueprint_applications(application_id) ON DELETE CASCADE,
+               FOREIGN KEY (project_id) REFERENCES board_projects(id) ON DELETE CASCADE,
+               FOREIGN KEY (work_item_id) REFERENCES board_work_items(id) ON DELETE CASCADE,
+               FOREIGN KEY (agent_profile_id) REFERENCES board_agent_profiles(id)
+             );",
+        )
+        .map_err(StoreError::Sqlite)
+}
+
+fn create_portfolio_orchestration_storage(connection: &Connection) -> Result<(), StoreError> {
+    connection
+        .execute_batch(
+            "CREATE TABLE IF NOT EXISTS board_portfolio_orchestration_revisions (
+               orchestration_id TEXT NOT NULL,
+               revision_id TEXT NOT NULL,
+               definition_json TEXT NOT NULL,
+               created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+               PRIMARY KEY (orchestration_id, revision_id)
+             );
+             CREATE TABLE IF NOT EXISTS board_portfolio_runs (
+               run_id TEXT PRIMARY KEY,
+               orchestration_id TEXT NOT NULL,
+               revision_id TEXT NOT NULL,
+               current_node_id TEXT NOT NULL,
+               status TEXT NOT NULL CHECK (
+                 status IN ('active', 'waiting_approval', 'paused', 'completed')
+               ),
+               completed_steps INTEGER NOT NULL CHECK (completed_steps >= 0),
+               next_tick_at_epoch_seconds INTEGER,
+               created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+               updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+               FOREIGN KEY (orchestration_id, revision_id)
+                 REFERENCES board_portfolio_orchestration_revisions(orchestration_id, revision_id)
+             );
+             CREATE TABLE IF NOT EXISTS board_portfolio_schedule_controls (
+               orchestration_id TEXT NOT NULL,
+               revision_id TEXT NOT NULL,
+               automatic_ticks_enabled INTEGER NOT NULL CHECK (
+                 automatic_ticks_enabled IN (0, 1)
+               ),
+               updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+               PRIMARY KEY (orchestration_id, revision_id),
+               FOREIGN KEY (orchestration_id, revision_id)
+                 REFERENCES board_portfolio_orchestration_revisions(orchestration_id, revision_id)
+             );
+             CREATE TABLE IF NOT EXISTS board_portfolio_run_steps (
+               run_id TEXT NOT NULL,
+               sequence INTEGER NOT NULL CHECK (sequence > 0),
+               node_id TEXT NOT NULL,
+               signal TEXT CHECK (
+                 signal IS NULL OR signal IN (
+                   'completed', 'no_candidate', 'needs_attention', 'failed',
+                   'approved', 'rejected', 'manual'
+                 )
+               ),
+               destination_node_id TEXT,
+               selected_project_id TEXT,
+               recorded_at_epoch_seconds INTEGER NOT NULL,
+               PRIMARY KEY (run_id, sequence),
+               FOREIGN KEY (run_id) REFERENCES board_portfolio_runs(run_id) ON DELETE CASCADE,
+               FOREIGN KEY (selected_project_id) REFERENCES board_projects(id) ON DELETE SET NULL
+             );",
+        )
+        .map_err(StoreError::Sqlite)
+}
+
+fn portfolio_run_from_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<Result<PortfolioRun, StoreError>> {
+    let status: String = row.get(4)?;
+    let completed_steps: i64 = row.get(5)?;
+    let Ok(status) = PortfolioRunStatus::try_from(status.as_str()) else {
+        return Ok(Err(StoreError::CorruptState(
+            "unknown Portfolio Run status",
+        )));
+    };
+    let Ok(completed_steps) = u32::try_from(completed_steps) else {
+        return Ok(Err(StoreError::CorruptState(
+            "invalid Portfolio Run step count",
+        )));
+    };
+    Ok(Ok(PortfolioRun {
+        run_id: row.get(0)?,
+        orchestration_id: row.get(1)?,
+        revision_id: row.get(2)?,
+        current_node_id: row.get(3)?,
+        status,
+        completed_steps,
+        next_tick_at_epoch_seconds: row.get(6)?,
+    }))
+}
+
+fn portfolio_run_step_from_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<Result<PortfolioRunStep, StoreError>> {
+    let sequence: i64 = row.get(1)?;
+    let signal: Option<String> = row.get(3)?;
+    let Ok(sequence) = u32::try_from(sequence) else {
+        return Ok(Err(StoreError::CorruptState(
+            "invalid Portfolio Run step sequence",
+        )));
+    };
+    let signal = match signal {
+        Some(signal) => match PortfolioSignal::try_from(signal.as_str()) {
+            Ok(signal) => Some(signal),
+            Err(_) => {
+                return Ok(Err(StoreError::CorruptState(
+                    "unknown Portfolio Run signal",
+                )));
+            }
+        },
+        None => None,
+    };
+    Ok(Ok(PortfolioRunStep {
+        run_id: row.get(0)?,
+        sequence,
+        node_id: row.get(2)?,
+        signal,
+        destination_node_id: row.get(4)?,
+        selected_project_id: row.get(5)?,
+        recorded_at_epoch_seconds: row.get(6)?,
+    }))
+}
+
+fn create_control_graph_storage(connection: &Connection) -> Result<(), StoreError> {
+    connection
+        .execute_batch(
+            "CREATE TABLE IF NOT EXISTS board_control_graph_revisions (
+               graph_id TEXT NOT NULL,
+               revision_id TEXT NOT NULL,
+               definition_json TEXT NOT NULL,
+               created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+               PRIMARY KEY (graph_id, revision_id)
+             );
+             CREATE TABLE IF NOT EXISTS board_project_graph_bindings (
+               project_id TEXT PRIMARY KEY,
+               graph_id TEXT NOT NULL,
+               revision_id TEXT NOT NULL,
+               entry_id TEXT NOT NULL,
+               FOREIGN KEY (project_id) REFERENCES board_projects(id) ON DELETE CASCADE,
+               FOREIGN KEY (graph_id, revision_id)
+                 REFERENCES board_control_graph_revisions(graph_id, revision_id)
+             );
+             CREATE TABLE IF NOT EXISTS board_graph_canvas_layouts (
+               graph_id TEXT PRIMARY KEY,
+               layout_json TEXT NOT NULL,
+               updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+             );
+             CREATE TABLE IF NOT EXISTS board_work_item_graph_positions (
+               work_item_id TEXT PRIMARY KEY,
+               project_id TEXT NOT NULL,
+               graph_id TEXT NOT NULL,
+               revision_id TEXT NOT NULL,
+               entry_id TEXT NOT NULL,
+               current_node_id TEXT NOT NULL,
+               FOREIGN KEY (work_item_id) REFERENCES board_work_items(id) ON DELETE CASCADE,
+               FOREIGN KEY (project_id) REFERENCES board_projects(id) ON DELETE CASCADE,
+               FOREIGN KEY (graph_id, revision_id)
+                 REFERENCES board_control_graph_revisions(graph_id, revision_id)
+             );
+             CREATE TABLE IF NOT EXISTS board_route_decisions (
+               decision_id TEXT PRIMARY KEY,
+               project_id TEXT NOT NULL,
+               work_item_id TEXT NOT NULL,
+               graph_id TEXT NOT NULL,
+               revision_id TEXT NOT NULL,
+               entry_id TEXT NOT NULL,
+               source_node_id TEXT NOT NULL,
+               signal_json TEXT NOT NULL,
+               proposed_route_id TEXT,
+               route_id TEXT NOT NULL,
+               next_node_id TEXT NOT NULL,
+               evidence_refs_json TEXT NOT NULL,
+               decided_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+               FOREIGN KEY (project_id) REFERENCES board_projects(id) ON DELETE CASCADE,
+               FOREIGN KEY (work_item_id) REFERENCES board_work_items(id) ON DELETE CASCADE,
+               FOREIGN KEY (graph_id, revision_id)
+                 REFERENCES board_control_graph_revisions(graph_id, revision_id)
+             );
+             CREATE TABLE IF NOT EXISTS board_graph_rewrite_proposals (
+               proposal_id TEXT PRIMARY KEY,
+               project_id TEXT NOT NULL,
+               status TEXT NOT NULL CHECK (status IN ('pending', 'approved', 'rejected')),
+               definition_json TEXT NOT NULL,
+               created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+               decided_at TEXT,
+               FOREIGN KEY (project_id) REFERENCES board_projects(id) ON DELETE CASCADE
+             );",
+        )
+        .map_err(StoreError::Sqlite)
+}
+
 fn set_schema_version(connection: &Connection) -> Result<(), StoreError> {
     connection
-        .execute_batch("PRAGMA user_version = 8;")
+        .execute_batch("PRAGMA user_version = 15;")
         .map_err(StoreError::Sqlite)
 }
 
@@ -1402,6 +3009,314 @@ fn insert_sample_projects(transaction: &rusqlite::Transaction<'_>) -> Result<(),
             .map_err(StoreError::Sqlite)?;
     }
     Ok(())
+}
+
+fn builtin_control_graphs() -> [ControlGraphRevision; 3] {
+    [direct_graph(), high_risk_graph(), reviewed_graph()]
+}
+
+fn builtin_orchestration_blueprints() -> [OrchestrationBlueprintRevision; 1] {
+    [OrchestrationBlueprintRevision {
+        blueprint_id: "evidence-first".to_owned(),
+        revision_id: "v1".to_owned(),
+        name: "Evidence-first delivery".to_owned(),
+        scope: BlueprintScope::Project,
+        entry_node_id: "approach".to_owned(),
+        nodes: vec![
+            BlueprintNode {
+                id: "approach".to_owned(),
+                kind: BlueprintNodeKind::Approach {
+                    approach_id: "evidence-first".to_owned(),
+                },
+                inputs: vec![NoteSocketKind::Context, NoteSocketKind::WorkItem],
+                outputs: vec![NoteSocketKind::Evidence],
+            },
+            BlueprintNode {
+                id: "audit".to_owned(),
+                kind: BlueprintNodeKind::Audit,
+                inputs: vec![NoteSocketKind::Evidence],
+                outputs: Vec::new(),
+            },
+            BlueprintNode {
+                id: "finish".to_owned(),
+                kind: BlueprintNodeKind::Terminal,
+                inputs: Vec::new(),
+                outputs: Vec::new(),
+            },
+        ],
+        links: vec![
+            BlueprintLink {
+                id: "approach-audit-flow".to_owned(),
+                source_node_id: "approach".to_owned(),
+                destination_node_id: "audit".to_owned(),
+                kind: BlueprintLinkKind::Flow {
+                    signal: ControlSignal::Succeeded,
+                },
+            },
+            BlueprintLink {
+                id: "approach-audit-evidence".to_owned(),
+                source_node_id: "approach".to_owned(),
+                destination_node_id: "audit".to_owned(),
+                kind: BlueprintLinkKind::Data {
+                    socket: NoteSocketKind::Evidence,
+                },
+            },
+            BlueprintLink {
+                id: "audit-finish".to_owned(),
+                source_node_id: "audit".to_owned(),
+                destination_node_id: "finish".to_owned(),
+                kind: BlueprintLinkKind::Flow {
+                    signal: ControlSignal::Passed,
+                },
+            },
+        ],
+    }]
+}
+
+fn builtin_portfolio_orchestrations() -> [PortfolioOrchestrationRevision; 1] {
+    [PortfolioOrchestrationRevision {
+        orchestration_id: "managed-products".to_owned(),
+        revision_id: "v2".to_owned(),
+        name: "Managed products orchestration".to_owned(),
+        schedule: PortfolioSchedule::Interval {
+            every_minutes: 60,
+            enabled: true,
+        },
+        entry_node_id: "select-project".to_owned(),
+        nodes: vec![
+            PortfolioNode {
+                id: "select-project".to_owned(),
+                kind: PortfolioNodeKind::ProjectSelector {
+                    selector: PortfolioProjectSelector::AllManaged,
+                },
+            },
+            PortfolioNode {
+                id: "summary".to_owned(),
+                kind: PortfolioNodeKind::PostAction {
+                    action: PortfolioPostAction::RecordSummary,
+                },
+            },
+            PortfolioNode {
+                id: "finish".to_owned(),
+                kind: PortfolioNodeKind::Terminal,
+            },
+        ],
+        routes: vec![
+            portfolio_route(
+                "selection-completed",
+                "select-project",
+                "summary",
+                PortfolioSignal::Completed,
+            ),
+            portfolio_route(
+                "selection-empty",
+                "select-project",
+                "summary",
+                PortfolioSignal::NoCandidate,
+            ),
+            portfolio_route(
+                "selection-attention",
+                "select-project",
+                "summary",
+                PortfolioSignal::NeedsAttention,
+            ),
+            portfolio_route(
+                "summary-recorded",
+                "summary",
+                "finish",
+                PortfolioSignal::Completed,
+            ),
+        ],
+    }]
+}
+
+fn portfolio_route(
+    id: &str,
+    source: &str,
+    destination: &str,
+    signal: PortfolioSignal,
+) -> PortfolioRoute {
+    PortfolioRoute {
+        id: id.to_owned(),
+        source_node_id: source.to_owned(),
+        destination_node_id: destination.to_owned(),
+        signal,
+    }
+}
+
+fn direct_graph() -> ControlGraphRevision {
+    ControlGraphRevision {
+        graph_id: "direct".to_owned(),
+        revision_id: "v1".to_owned(),
+        entries: vec![GraphEntry {
+            id: "standard".to_owned(),
+            node_id: "implement".to_owned(),
+        }],
+        nodes: vec![
+            agent_node("implement", "implementer"),
+            ControlNode {
+                id: "verify".to_owned(),
+                kind: ControlNodeKind::Audit,
+            },
+            terminal_node(),
+        ],
+        routes: vec![
+            route(
+                "implementation-complete",
+                "implement",
+                "verify",
+                ControlSignal::Succeeded,
+            ),
+            route(
+                "verification-passed",
+                "verify",
+                "finish",
+                ControlSignal::Passed,
+            ),
+        ],
+        anchors: vec![anchor(
+            "verified-result",
+            "Completion requires independently observed verification evidence",
+        )],
+    }
+}
+
+fn reviewed_graph() -> ControlGraphRevision {
+    ControlGraphRevision {
+        graph_id: "reviewed".to_owned(),
+        revision_id: "v1".to_owned(),
+        entries: vec![
+            GraphEntry {
+                id: "standard".to_owned(),
+                node_id: "research".to_owned(),
+            },
+            GraphEntry {
+                id: "implementation-only".to_owned(),
+                node_id: "implement".to_owned(),
+            },
+        ],
+        nodes: vec![
+            agent_node("research", "researcher"),
+            agent_node("implement", "implementer"),
+            agent_node("review", "reviewer"),
+            ControlNode {
+                id: "verify".to_owned(),
+                kind: ControlNodeKind::Audit,
+            },
+            terminal_node(),
+        ],
+        routes: vec![
+            route(
+                "research-complete",
+                "research",
+                "implement",
+                ControlSignal::Succeeded,
+            ),
+            route(
+                "implementation-complete",
+                "implement",
+                "review",
+                ControlSignal::Succeeded,
+            ),
+            route("review-passed", "review", "verify", ControlSignal::Passed),
+            route(
+                "verification-passed",
+                "verify",
+                "finish",
+                ControlSignal::Passed,
+            ),
+        ],
+        anchors: vec![anchor(
+            "independent-review",
+            "Completion requires review and verification outside the implementation loop",
+        )],
+    }
+}
+
+fn high_risk_graph() -> ControlGraphRevision {
+    ControlGraphRevision {
+        graph_id: "high-risk".to_owned(),
+        revision_id: "v1".to_owned(),
+        entries: vec![GraphEntry {
+            id: "standard".to_owned(),
+            node_id: "plan".to_owned(),
+        }],
+        nodes: vec![
+            agent_node("plan", "researcher"),
+            ControlNode {
+                id: "start-approval".to_owned(),
+                kind: ControlNodeKind::Approval,
+            },
+            agent_node("implement", "implementer"),
+            ControlNode {
+                id: "audit".to_owned(),
+                kind: ControlNodeKind::Audit,
+            },
+            ControlNode {
+                id: "acceptance".to_owned(),
+                kind: ControlNodeKind::Approval,
+            },
+            terminal_node(),
+        ],
+        routes: vec![
+            route(
+                "plan-ready",
+                "plan",
+                "start-approval",
+                ControlSignal::NeedsApproval,
+            ),
+            route(
+                "start-approved",
+                "start-approval",
+                "implement",
+                ControlSignal::Approved,
+            ),
+            route(
+                "implementation-complete",
+                "implement",
+                "audit",
+                ControlSignal::Succeeded,
+            ),
+            route("audit-passed", "audit", "acceptance", ControlSignal::Passed),
+            route("accepted", "acceptance", "finish", ControlSignal::Approved),
+        ],
+        anchors: vec![anchor(
+            "human-authority",
+            "Human approval is required before execution and final acceptance",
+        )],
+    }
+}
+
+fn agent_node(id: &str, agent_profile_id: &str) -> ControlNode {
+    ControlNode {
+        id: id.to_owned(),
+        kind: ControlNodeKind::AgentLoop {
+            agent_profile_id: agent_profile_id.to_owned(),
+        },
+    }
+}
+
+fn terminal_node() -> ControlNode {
+    ControlNode {
+        id: "finish".to_owned(),
+        kind: ControlNodeKind::Terminal,
+    }
+}
+
+fn route(id: &str, source: &str, destination: &str, signal: ControlSignal) -> ControlRoute {
+    ControlRoute {
+        id: id.to_owned(),
+        source_node_id: source.to_owned(),
+        destination_node_id: destination.to_owned(),
+        signal,
+    }
+}
+
+fn anchor(id: &str, description: &str) -> GraphAnchor {
+    GraphAnchor {
+        id: id.to_owned(),
+        description: description.to_owned(),
+    }
 }
 
 fn insert_sample_execution_workspaces(
@@ -2051,6 +3966,199 @@ fn validate_capability(value: &str) -> Result<(), StoreError> {
     Ok(())
 }
 
+fn validate_blueprint_application(
+    application: &BlueprintApplication,
+    runtime_binding: &BlueprintRuntimeBinding,
+) -> Result<(), StoreError> {
+    for value in [
+        &application.application_id,
+        &application.blueprint_id,
+        &application.revision_id,
+        &application.entry_node_id,
+        &application.project_id,
+        &runtime_binding.application_id,
+        &runtime_binding.project_id,
+        &runtime_binding.agent_profile_id,
+    ] {
+        validate_stable_identifier(value)?;
+    }
+    validate_work_item_reference(&application.work_item_id)?;
+    validate_work_item_reference(&runtime_binding.work_item_id)?;
+    if application.application_id != runtime_binding.application_id
+        || application.project_id != runtime_binding.project_id
+        || application.work_item_id != runtime_binding.work_item_id
+        || runtime_binding.execution_workspace.project_id != application.project_id
+    {
+        return Err(StoreError::InvalidRequest);
+    }
+    Ok(())
+}
+
+fn canonical_blueprint_note_pins(
+    pins: &[BlueprintApproachNotePin],
+) -> Result<Vec<BlueprintApproachNotePin>, StoreError> {
+    let mut pins = pins.to_vec();
+    for pin in &pins {
+        pin.validate().map_err(|_| StoreError::InvalidRequest)?;
+    }
+    pins.sort_by(|left, right| left.approach_id.cmp(&right.approach_id));
+    if pins
+        .windows(2)
+        .any(|pair| pair[0].approach_id == pair[1].approach_id)
+    {
+        return Err(StoreError::InvalidRequest);
+    }
+    Ok(pins)
+}
+
+fn validate_blueprint_application_facts(
+    connection: &Connection,
+    application: &BlueprintApplication,
+    runtime_binding: &BlueprintRuntimeBinding,
+    workspace: &ExecutionWorkspaceConnection,
+    pins: &[BlueprintApproachNotePin],
+) -> Result<(), StoreError> {
+    let definition: String = connection
+        .query_row(
+            "SELECT definition_json
+             FROM board_orchestration_blueprint_revisions
+             WHERE blueprint_id = ?1 AND revision_id = ?2",
+            params![application.blueprint_id, application.revision_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(StoreError::Sqlite)?
+        .ok_or(StoreError::BlueprintRevisionNotFound)?;
+    let revision: OrchestrationBlueprintRevision =
+        serde_json::from_str(&definition).map_err(StoreError::Json)?;
+    revision
+        .validate()
+        .map_err(|_| StoreError::CorruptState("invalid Orchestration Blueprint revision"))?;
+    if revision.entry_node_id != application.entry_node_id {
+        return Err(StoreError::ConcurrentChange);
+    }
+    let mut expected_approaches = revision
+        .approach_ids()
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    expected_approaches.sort();
+    expected_approaches.dedup();
+    if expected_approaches
+        != pins
+            .iter()
+            .map(|pin| pin.approach_id.clone())
+            .collect::<Vec<_>>()
+    {
+        return Err(StoreError::InvalidRequest);
+    }
+
+    let (work_item_project_id, assigned_agent_profile_id) = connection
+        .query_row(
+            "SELECT project_id, agent_profile_id
+             FROM board_work_items
+             WHERE id = ?1",
+            [&application.work_item_id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+        )
+        .optional()
+        .map_err(StoreError::Sqlite)?
+        .ok_or(StoreError::WorkItemNotFound)?;
+    if work_item_project_id != application.project_id {
+        return Err(StoreError::WorkItemNotFound);
+    }
+    if assigned_agent_profile_id.as_deref() != Some(runtime_binding.agent_profile_id.as_str()) {
+        return Err(StoreError::ConcurrentChange);
+    }
+    if load_agent_profile(connection, &runtime_binding.agent_profile_id)?.is_none() {
+        return Err(StoreError::AgentProfileNotFound);
+    }
+    let current_workspace = load_execution_workspace(connection, &application.project_id)?
+        .ok_or(StoreError::ExecutionWorkspaceNotFound)?;
+    if current_workspace != *workspace {
+        return Err(StoreError::ConcurrentChange);
+    }
+    Ok(())
+}
+
+fn load_blueprint_application_receipt(
+    connection: &Connection,
+    application_id: &str,
+) -> Result<Option<BlueprintApplicationReceipt>, StoreError> {
+    let raw = connection
+        .query_row(
+            "SELECT a.blueprint_id, a.revision_id, a.entry_node_id, a.project_id,
+                    a.work_item_id, b.agent_profile_id, b.execution_workspace_kind,
+                    b.execution_workspace_location, b.approach_notes_json
+             FROM board_blueprint_applications AS a
+             JOIN board_blueprint_runtime_bindings AS b
+               ON b.application_id = a.application_id
+             WHERE a.application_id = ?1",
+            [application_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, Option<String>>(7)?,
+                    row.get::<_, String>(8)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(StoreError::Sqlite)?;
+    raw.map(
+        |(
+            blueprint_id,
+            revision_id,
+            entry_node_id,
+            project_id,
+            work_item_id,
+            agent_profile_id,
+            workspace_kind,
+            workspace_location,
+            pins_json,
+        )| {
+            let kind = ExecutionWorkspaceKind::try_from(workspace_kind.as_str())
+                .map_err(|_| StoreError::CorruptState("unknown Execution workspace kind"))?;
+            let execution_workspace =
+                canonical_execution_workspace(&ExecutionWorkspaceConnection {
+                    project_id: project_id.clone(),
+                    kind,
+                    location: workspace_location,
+                })?;
+            let pins: Vec<BlueprintApproachNotePin> =
+                serde_json::from_str(&pins_json).map_err(StoreError::Json)?;
+            let approach_notes = canonical_blueprint_note_pins(&pins)
+                .map_err(|_| StoreError::CorruptState("invalid Blueprint Approach Note pins"))?;
+            Ok(BlueprintApplicationReceipt {
+                application: BlueprintApplication {
+                    application_id: application_id.to_owned(),
+                    blueprint_id,
+                    revision_id,
+                    entry_node_id,
+                    project_id: project_id.clone(),
+                    work_item_id: work_item_id.clone(),
+                },
+                runtime_binding: BlueprintRuntimeBinding {
+                    application_id: application_id.to_owned(),
+                    project_id,
+                    work_item_id,
+                    agent_profile_id,
+                    execution_workspace,
+                    approach_notes,
+                },
+                created: false,
+            })
+        },
+    )
+    .transpose()
+}
+
 fn canonical_execution_workspace(
     connection: &ExecutionWorkspaceConnection,
 ) -> Result<ExecutionWorkspaceConnection, StoreError> {
@@ -2079,6 +4187,556 @@ fn canonical_execution_workspace(
     })
 }
 
+fn validate_route_decision_request(request: &RouteDecisionRequest) -> Result<(), StoreError> {
+    validate_stable_identifier(&request.decision_id)?;
+    validate_stable_identifier(&request.project_id)?;
+    validate_stable_identifier(&request.expected_current_node_id)?;
+    validate_work_item_reference(&request.work_item_id)?;
+    if let Some(proposed_route_id) = &request.proposed_route_id {
+        validate_stable_identifier(proposed_route_id)?;
+    }
+    if request.evidence_refs.is_empty() || request.evidence_refs.len() > 32 {
+        return Err(StoreError::InvalidRequest);
+    }
+    for evidence_ref in &request.evidence_refs {
+        let length = evidence_ref.chars().count();
+        if length == 0
+            || length > 512
+            || evidence_ref.trim() != evidence_ref
+            || evidence_ref.chars().any(char::is_control)
+        {
+            return Err(StoreError::InvalidRequest);
+        }
+    }
+    Ok(())
+}
+
+fn validate_graph_rewrite_proposal(proposal: &GraphRewriteProposal) -> Result<(), StoreError> {
+    validate_stable_identifier(&proposal.proposal_id)?;
+    validate_stable_identifier(&proposal.project_id)?;
+    if proposal.source_binding.project_id != proposal.project_id
+        || proposal.candidate_graph.graph_id != proposal.source_binding.graph_id
+        || proposal.candidate_graph.revision_id == proposal.source_binding.revision_id
+        || !proposal
+            .candidate_graph
+            .entries
+            .iter()
+            .any(|entry| entry.id == proposal.source_binding.entry_id)
+    {
+        return Err(StoreError::InvalidRequest);
+    }
+    proposal
+        .candidate_graph
+        .validate()
+        .map_err(|_| StoreError::InvalidRequest)?;
+    if !all_graph_nodes_are_reachable(&proposal.candidate_graph) {
+        return Err(StoreError::InvalidRequest);
+    }
+    let rationale_length = proposal.rationale.chars().count();
+    if rationale_length == 0
+        || rationale_length > 1024
+        || proposal.rationale.trim() != proposal.rationale
+        || proposal.rationale.chars().any(char::is_control)
+        || proposal.evidence_refs.is_empty()
+        || proposal.evidence_refs.len() > 32
+    {
+        return Err(StoreError::InvalidRequest);
+    }
+    for evidence_ref in &proposal.evidence_refs {
+        let length = evidence_ref.chars().count();
+        if length == 0
+            || length > 512
+            || evidence_ref.trim() != evidence_ref
+            || evidence_ref.chars().any(char::is_control)
+        {
+            return Err(StoreError::InvalidRequest);
+        }
+    }
+    match &proposal.operation {
+        GraphRewriteOperation::ReplaceAgentProfile {
+            node_id,
+            previous_agent_profile_id,
+            replacement_agent_profile_id,
+        } => {
+            validate_stable_identifier(node_id)?;
+            validate_stable_identifier(previous_agent_profile_id)?;
+            validate_stable_identifier(replacement_agent_profile_id)?;
+            if previous_agent_profile_id == replacement_agent_profile_id
+                || !proposal.candidate_graph.nodes.iter().any(|node| {
+                    node.id == *node_id
+                        && matches!(
+                            &node.kind,
+                            ControlNodeKind::AgentLoop { agent_profile_id }
+                                if agent_profile_id == replacement_agent_profile_id
+                        )
+                })
+            {
+                return Err(StoreError::InvalidRequest);
+            }
+        }
+        GraphRewriteOperation::EditTopology {
+            added_nodes,
+            removed_node_ids,
+            added_routes,
+            removed_route_ids,
+        } => {
+            let edit_count = added_nodes.len()
+                + removed_node_ids.len()
+                + added_routes.len()
+                + removed_route_ids.len();
+            if edit_count == 0 || edit_count > 128 {
+                return Err(StoreError::InvalidRequest);
+            }
+            for node in added_nodes {
+                validate_stable_identifier(&node.id)?;
+                if let ControlNodeKind::AgentLoop { agent_profile_id } = &node.kind {
+                    validate_stable_identifier(agent_profile_id)?;
+                }
+            }
+            for node_id in removed_node_ids {
+                validate_stable_identifier(node_id)?;
+            }
+            for route in added_routes {
+                validate_stable_identifier(&route.id)?;
+                validate_stable_identifier(&route.source_node_id)?;
+                validate_stable_identifier(&route.destination_node_id)?;
+            }
+            for route_id in removed_route_ids {
+                validate_stable_identifier(route_id)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_graph_rewrite_relationships(
+    connection: &Connection,
+    proposal: &GraphRewriteProposal,
+) -> Result<(), StoreError> {
+    let source_graph = load_control_graph_revision(
+        connection,
+        &proposal.source_binding.graph_id,
+        &proposal.source_binding.revision_id,
+    )?;
+    let mut expected_candidate = source_graph;
+    expected_candidate
+        .revision_id
+        .clone_from(&proposal.candidate_graph.revision_id);
+    match &proposal.operation {
+        GraphRewriteOperation::ReplaceAgentProfile {
+            node_id,
+            previous_agent_profile_id,
+            replacement_agent_profile_id,
+        } => {
+            let replacement_exists: bool = connection
+                .query_row(
+                    "SELECT EXISTS(
+                       SELECT 1 FROM board_agent_profiles WHERE id = ?1
+                     )",
+                    [replacement_agent_profile_id],
+                    |row| row.get(0),
+                )
+                .map_err(StoreError::Sqlite)?;
+            if !replacement_exists {
+                return Err(StoreError::AgentProfileNotFound);
+            }
+            let node = expected_candidate
+                .nodes
+                .iter_mut()
+                .find(|node| node.id == *node_id)
+                .ok_or(StoreError::InvalidRequest)?;
+            let ControlNodeKind::AgentLoop { agent_profile_id } = &mut node.kind else {
+                return Err(StoreError::InvalidRequest);
+            };
+            if agent_profile_id != previous_agent_profile_id {
+                return Err(StoreError::InvalidRequest);
+            }
+            agent_profile_id.clone_from(replacement_agent_profile_id);
+        }
+        GraphRewriteOperation::EditTopology {
+            added_nodes,
+            removed_node_ids,
+            added_routes,
+            removed_route_ids,
+        } => {
+            for node in added_nodes {
+                if let ControlNodeKind::AgentLoop { agent_profile_id } = &node.kind {
+                    let profile_exists: bool = connection
+                        .query_row(
+                            "SELECT EXISTS(
+                               SELECT 1 FROM board_agent_profiles WHERE id = ?1
+                             )",
+                            [agent_profile_id],
+                            |row| row.get(0),
+                        )
+                        .map_err(StoreError::Sqlite)?;
+                    if !profile_exists {
+                        return Err(StoreError::AgentProfileNotFound);
+                    }
+                }
+            }
+            expected_candidate
+                .routes
+                .retain(|route| !removed_route_ids.contains(&route.id));
+            expected_candidate
+                .nodes
+                .retain(|node| !removed_node_ids.contains(&node.id));
+            expected_candidate.nodes.extend(added_nodes.iter().cloned());
+            expected_candidate
+                .routes
+                .extend(added_routes.iter().cloned());
+        }
+    }
+    if expected_candidate != proposal.candidate_graph {
+        return Err(StoreError::InvalidRequest);
+    }
+    Ok(())
+}
+
+fn all_graph_nodes_are_reachable(graph: &ControlGraphRevision) -> bool {
+    let mut reachable = graph
+        .entries
+        .iter()
+        .map(|entry| entry.node_id.as_str())
+        .collect::<HashSet<_>>();
+    let mut queue = reachable.iter().copied().collect::<VecDeque<_>>();
+    while let Some(source) = queue.pop_front() {
+        for destination in graph
+            .routes
+            .iter()
+            .filter(|route| route.source_node_id == source)
+            .map(|route| route.destination_node_id.as_str())
+        {
+            if reachable.insert(destination) {
+                queue.push_back(destination);
+            }
+        }
+    }
+    reachable.len() == graph.nodes.len()
+}
+
+fn publish_graph_rewrite_candidate(
+    transaction: &rusqlite::Transaction<'_>,
+    proposal: &GraphRewriteProposal,
+    previous_binding: &ProjectGraphBinding,
+) -> Result<ProjectGraphBinding, StoreError> {
+    if previous_binding != &proposal.source_binding {
+        return Err(StoreError::ConcurrentChange);
+    }
+    let candidate_exists: bool = transaction
+        .query_row(
+            "SELECT EXISTS(
+               SELECT 1 FROM board_control_graph_revisions
+               WHERE graph_id = ?1 AND revision_id = ?2
+             )",
+            params![
+                proposal.candidate_graph.graph_id,
+                proposal.candidate_graph.revision_id
+            ],
+            |row| row.get(0),
+        )
+        .map_err(StoreError::Sqlite)?;
+    if candidate_exists {
+        return Err(StoreError::GraphRevisionAlreadyExists);
+    }
+    let candidate_definition =
+        serde_json::to_string(&proposal.candidate_graph).map_err(StoreError::Json)?;
+    transaction
+        .execute(
+            "INSERT INTO board_control_graph_revisions
+               (graph_id, revision_id, definition_json)
+             VALUES (?1, ?2, ?3)",
+            params![
+                proposal.candidate_graph.graph_id,
+                proposal.candidate_graph.revision_id,
+                candidate_definition
+            ],
+        )
+        .map_err(StoreError::Sqlite)?;
+    let mut resulting_binding = previous_binding.clone();
+    resulting_binding
+        .revision_id
+        .clone_from(&proposal.candidate_graph.revision_id);
+    let changed = transaction
+        .execute(
+            "UPDATE board_project_graph_bindings
+             SET revision_id = ?1
+             WHERE project_id = ?2
+               AND graph_id = ?3
+               AND revision_id = ?4
+               AND entry_id = ?5",
+            params![
+                resulting_binding.revision_id,
+                proposal.source_binding.project_id,
+                proposal.source_binding.graph_id,
+                proposal.source_binding.revision_id,
+                proposal.source_binding.entry_id
+            ],
+        )
+        .map_err(StoreError::Sqlite)?;
+    if changed != 1 {
+        return Err(StoreError::ConcurrentChange);
+    }
+    Ok(resulting_binding)
+}
+
+fn validate_work_item_reference(work_item_id: &str) -> Result<(), StoreError> {
+    let length = work_item_id.chars().count();
+    if length == 0
+        || length > 128
+        || work_item_id.trim() != work_item_id
+        || work_item_id.chars().any(char::is_control)
+    {
+        return Err(StoreError::InvalidRequest);
+    }
+    Ok(())
+}
+
+fn load_control_graph_revision(
+    connection: &Connection,
+    graph_id: &str,
+    revision_id: &str,
+) -> Result<ControlGraphRevision, StoreError> {
+    let definition: Option<String> = connection
+        .query_row(
+            "SELECT definition_json
+             FROM board_control_graph_revisions
+             WHERE graph_id = ?1 AND revision_id = ?2",
+            params![graph_id, revision_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(StoreError::Sqlite)?;
+    let Some(definition) = definition else {
+        return Err(StoreError::GraphRevisionNotFound);
+    };
+    let graph: ControlGraphRevision =
+        serde_json::from_str(&definition).map_err(StoreError::Json)?;
+    graph
+        .validate()
+        .map_err(|_| StoreError::CorruptState("invalid Control graph revision"))?;
+    Ok(graph)
+}
+
+fn resolve_agent_loop_target(
+    connection: &Connection,
+    position: &WorkItemGraphPosition,
+) -> Result<AgentLoopExecutionTarget, StoreError> {
+    let graph = load_control_graph_revision(connection, &position.graph_id, &position.revision_id)?;
+    let target = graph
+        .agent_loop_target(&position.current_node_id)
+        .map_err(|_| StoreError::ControlNodeNotExecutable)?;
+    let profile_exists: bool = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM board_agent_profiles WHERE id = ?1)",
+            [&target.agent_profile_id],
+            |row| row.get(0),
+        )
+        .map_err(StoreError::Sqlite)?;
+    if !profile_exists {
+        return Err(StoreError::CorruptState(
+            "Control node Agent profile is missing",
+        ));
+    }
+    Ok(target)
+}
+
+fn initial_graph_position(
+    connection: &Connection,
+    project_id: &str,
+    work_item_id: &str,
+) -> Result<WorkItemGraphPosition, StoreError> {
+    let binding: Option<ProjectGraphBinding> = connection
+        .query_row(
+            "SELECT project_id, graph_id, revision_id, entry_id
+             FROM board_project_graph_bindings
+             WHERE project_id = ?1",
+            [project_id],
+            |row| {
+                Ok(ProjectGraphBinding {
+                    project_id: row.get(0)?,
+                    graph_id: row.get(1)?,
+                    revision_id: row.get(2)?,
+                    entry_id: row.get(3)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(StoreError::Sqlite)?;
+    let Some(binding) = binding else {
+        return Err(StoreError::ProjectGraphBindingNotFound);
+    };
+    let graph = load_control_graph_revision(connection, &binding.graph_id, &binding.revision_id)?;
+    binding
+        .validate_against(&graph)
+        .map_err(|_| StoreError::CorruptState("invalid Project graph binding"))?;
+    let entry = graph
+        .entries
+        .iter()
+        .find(|entry| entry.id == binding.entry_id)
+        .ok_or(StoreError::CorruptState("Graph entry is missing"))?;
+    Ok(WorkItemGraphPosition {
+        project_id: project_id.to_owned(),
+        work_item_id: work_item_id.to_owned(),
+        graph_id: binding.graph_id,
+        revision_id: binding.revision_id,
+        entry_id: binding.entry_id,
+        current_node_id: entry.node_id.clone(),
+    })
+}
+
+fn position_after(decision: &RouteDecision) -> WorkItemGraphPosition {
+    WorkItemGraphPosition {
+        project_id: decision.project_id.clone(),
+        work_item_id: decision.work_item_id.clone(),
+        graph_id: decision.graph_id.clone(),
+        revision_id: decision.revision_id.clone(),
+        entry_id: decision.entry_id.clone(),
+        current_node_id: decision.next_node_id.clone(),
+    }
+}
+
+fn persist_route_decision(
+    connection: &Connection,
+    decision: &RouteDecision,
+    resulting_position: &WorkItemGraphPosition,
+) -> Result<(), StoreError> {
+    let signal_json = serde_json::to_string(&decision.signal).map_err(StoreError::Json)?;
+    let evidence_refs_json =
+        serde_json::to_string(&decision.evidence_refs).map_err(StoreError::Json)?;
+    connection
+        .execute(
+            "INSERT INTO board_route_decisions (
+               decision_id, project_id, work_item_id, graph_id, revision_id, entry_id,
+               source_node_id, signal_json, proposed_route_id, route_id, next_node_id,
+               evidence_refs_json
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            params![
+                decision.decision_id,
+                decision.project_id,
+                decision.work_item_id,
+                decision.graph_id,
+                decision.revision_id,
+                decision.entry_id,
+                decision.source_node_id,
+                signal_json,
+                decision.proposed_route_id,
+                decision.route_id,
+                decision.next_node_id,
+                evidence_refs_json
+            ],
+        )
+        .map_err(StoreError::Sqlite)?;
+    connection
+        .execute(
+            "INSERT INTO board_work_item_graph_positions (
+               work_item_id, project_id, graph_id, revision_id, entry_id, current_node_id
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(work_item_id) DO UPDATE SET current_node_id = excluded.current_node_id",
+            params![
+                resulting_position.work_item_id,
+                resulting_position.project_id,
+                resulting_position.graph_id,
+                resulting_position.revision_id,
+                resulting_position.entry_id,
+                resulting_position.current_node_id
+            ],
+        )
+        .map_err(StoreError::Sqlite)?;
+    Ok(())
+}
+
+fn route_decision_matches_request(
+    decision: &RouteDecision,
+    request: &RouteDecisionRequest,
+) -> bool {
+    decision.decision_id == request.decision_id
+        && decision.project_id == request.project_id
+        && decision.work_item_id == request.work_item_id
+        && decision.source_node_id == request.expected_current_node_id
+        && decision.signal == request.signal
+        && decision.proposed_route_id == request.proposed_route_id
+        && decision.evidence_refs == request.evidence_refs
+}
+
+fn route_decision_select_sql(suffix: &str) -> String {
+    format!(
+        "SELECT decision_id, project_id, work_item_id, graph_id, revision_id, entry_id,
+                source_node_id, signal_json, proposed_route_id, route_id, next_node_id,
+                evidence_refs_json
+         FROM board_route_decisions {suffix}"
+    )
+}
+
+struct RawRouteDecision {
+    decision_id: String,
+    project_id: String,
+    work_item_id: String,
+    graph_id: String,
+    revision_id: String,
+    entry_id: String,
+    source_node_id: String,
+    signal_json: String,
+    proposed_route_id: Option<String>,
+    route_id: String,
+    next_node_id: String,
+    evidence_refs_json: String,
+}
+
+fn raw_route_decision(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawRouteDecision> {
+    Ok(RawRouteDecision {
+        decision_id: row.get(0)?,
+        project_id: row.get(1)?,
+        work_item_id: row.get(2)?,
+        graph_id: row.get(3)?,
+        revision_id: row.get(4)?,
+        entry_id: row.get(5)?,
+        source_node_id: row.get(6)?,
+        signal_json: row.get(7)?,
+        proposed_route_id: row.get(8)?,
+        route_id: row.get(9)?,
+        next_node_id: row.get(10)?,
+        evidence_refs_json: row.get(11)?,
+    })
+}
+
+fn decode_route_decision(raw: RawRouteDecision) -> Result<RouteDecision, StoreError> {
+    let signal = serde_json::from_str(&raw.signal_json).map_err(StoreError::Json)?;
+    let evidence_refs = serde_json::from_str(&raw.evidence_refs_json).map_err(StoreError::Json)?;
+    Ok(RouteDecision {
+        decision_id: raw.decision_id,
+        project_id: raw.project_id,
+        work_item_id: raw.work_item_id,
+        graph_id: raw.graph_id,
+        revision_id: raw.revision_id,
+        entry_id: raw.entry_id,
+        source_node_id: raw.source_node_id,
+        signal,
+        proposed_route_id: raw.proposed_route_id,
+        route_id: raw.route_id,
+        next_node_id: raw.next_node_id,
+        evidence_refs,
+    })
+}
+
+fn graph_position_select_sql(suffix: &str) -> String {
+    format!(
+        "SELECT project_id, work_item_id, graph_id, revision_id, entry_id, current_node_id
+         FROM board_work_item_graph_positions {suffix}"
+    )
+}
+
+fn graph_position_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorkItemGraphPosition> {
+    Ok(WorkItemGraphPosition {
+        project_id: row.get(0)?,
+        work_item_id: row.get(1)?,
+        graph_id: row.get(2)?,
+        revision_id: row.get(3)?,
+        entry_id: row.get(4)?,
+        current_node_id: row.get(5)?,
+    })
+}
+
 #[derive(Debug, Error)]
 pub enum StoreError {
     #[error("request did not satisfy the Board contract")]
@@ -2087,10 +4745,40 @@ pub enum StoreError {
     ProjectNotFound,
     #[error("a Board project with this ID already exists")]
     ProjectAlreadyExists,
+    #[error("a Control graph revision with this identity already exists")]
+    GraphRevisionAlreadyExists,
+    #[error("an Orchestration Blueprint revision with this identity already exists")]
+    BlueprintRevisionAlreadyExists,
+    #[error("the requested Orchestration Blueprint revision was not found")]
+    BlueprintRevisionNotFound,
+    #[error("a Blueprint Application with this identity already exists")]
+    BlueprintApplicationAlreadyExists,
+    #[error("a Portfolio orchestration revision with this identity already exists")]
+    PortfolioOrchestrationRevisionAlreadyExists,
+    #[error("a Graph rewrite proposal with this identity already exists")]
+    GraphRewriteProposalAlreadyExists,
+    #[error("the requested Graph rewrite proposal was not found")]
+    GraphRewriteProposalNotFound,
+    #[error("the Graph rewrite proposal already has a final decision")]
+    GraphRewriteProposalAlreadyDecided,
+    #[error("the requested Control graph revision was not found")]
+    GraphRevisionNotFound,
+    #[error("the Board project does not have a selected Control graph")]
+    ProjectGraphBindingNotFound,
+    #[error("a Route decision with this identity already exists")]
+    RouteDecisionAlreadyExists,
+    #[error("Safe Autopilot could not select the proposed Control route")]
+    RouteNotSelected,
+    #[error("the Work item does not have a pinned Control graph position")]
+    WorkItemGraphPositionNotFound,
+    #[error("the current Control node is not an Agent Loop execution stage")]
+    ControlNodeNotExecutable,
     #[error("Work item was not found in the requested project")]
     WorkItemNotFound,
     #[error("Agent profile was not found")]
     AgentProfileNotFound,
+    #[error("Execution workspace was not found")]
+    ExecutionWorkspaceNotFound,
     #[error("an Agent profile with this ID already exists")]
     AgentProfileAlreadyExists,
     #[error("a Work item with this ID already exists")]
@@ -2109,15 +4797,623 @@ pub enum StoreError {
     CreateDirectory(#[source] std::io::Error),
     #[error("Board storage operation failed")]
     Sqlite(#[source] rusqlite::Error),
+    #[error("Board graph serialization failed")]
+    Json(#[source] serde_json::Error),
     #[error("Board storage is corrupt: {0}")]
     CorruptState(&'static str),
 }
 
 #[cfg(test)]
 mod tests {
-    use gareji_board_domain::{CheckpointOutcome, CheckpointSource, ProgressActivity};
+    use gareji_board_domain::{
+        CheckpointOutcome, CheckpointSource, ControlGraphRevision, ControlNode, ControlNodeKind,
+        ControlRoute, ControlSignal, GraphAnchor, GraphCanvasLayout, GraphCanvasNodePosition,
+        GraphEntry, ProgressActivity, ProjectGraphBinding, ProjectGraphBindingSaveRequest,
+        RouteDecisionRequest,
+    };
 
     use super::*;
+
+    #[test]
+    fn project_can_select_a_persisted_graph_revision_and_entry() {
+        let mut store = SqliteBoardStore::open_in_memory().unwrap();
+        store.seed_sample_if_empty().unwrap();
+        let graph = reviewed_graph();
+
+        assert!(store.save_control_graph_revision(&graph).unwrap());
+        assert!(!store.save_control_graph_revision(&graph).unwrap());
+
+        let target = ProjectGraphBinding {
+            project_id: "gareji-board".to_owned(),
+            graph_id: "reviewed".to_owned(),
+            revision_id: "v1".to_owned(),
+            entry_id: "standard".to_owned(),
+        };
+        let receipt = store
+            .save_project_graph_binding(&ProjectGraphBindingSaveRequest {
+                expected: None,
+                target: target.clone(),
+            })
+            .unwrap();
+
+        assert!(receipt.changed);
+        assert_eq!(receipt.previous, None);
+        assert_eq!(receipt.resulting, target);
+        assert_eq!(store.load_control_graph_revisions().unwrap(), vec![graph]);
+        assert_eq!(
+            store.load_project_graph_bindings().unwrap(),
+            vec![receipt.resulting]
+        );
+    }
+
+    #[test]
+    fn graph_canvas_layout_is_saved_independently_from_graph_revisions() {
+        let mut store = SqliteBoardStore::open_in_memory().unwrap();
+        let mut layout = GraphCanvasLayout {
+            graph_id: "reviewed".to_owned(),
+            positions: vec![GraphCanvasNodePosition {
+                node_id: "verify".to_owned(),
+                x: 480.0,
+                y: 220.0,
+            }],
+        };
+
+        store.save_graph_canvas_layout(&layout).unwrap();
+        assert_eq!(
+            store.load_graph_canvas_layouts().unwrap(),
+            vec![layout.clone()]
+        );
+
+        layout.positions[0].x = 640.0;
+        store.save_graph_canvas_layout(&layout).unwrap();
+        assert_eq!(store.load_graph_canvas_layouts().unwrap(), vec![layout]);
+        assert!(store.load_control_graph_revisions().unwrap().is_empty());
+    }
+
+    #[test]
+    fn project_route_history_is_ordered_and_does_not_cross_project_boundaries() {
+        let mut store = SqliteBoardStore::open_in_memory().unwrap();
+        store.seed_sample_if_empty().unwrap();
+        store.ensure_builtin_control_graphs().unwrap();
+        for project_id in ["gareji-board", "gareji-core"] {
+            store
+                .save_project_graph_binding(&ProjectGraphBindingSaveRequest {
+                    expected: None,
+                    target: ProjectGraphBinding {
+                        project_id: project_id.to_owned(),
+                        graph_id: "direct".to_owned(),
+                        revision_id: "v1".to_owned(),
+                        entry_id: "standard".to_owned(),
+                    },
+                })
+                .unwrap();
+        }
+        store
+            .record_route_decision(&RouteDecisionRequest {
+                decision_id: "board-1-implemented".to_owned(),
+                project_id: "gareji-board".to_owned(),
+                work_item_id: "BOARD-1".to_owned(),
+                expected_current_node_id: "implement".to_owned(),
+                signal: ControlSignal::Succeeded,
+                proposed_route_id: None,
+                evidence_refs: vec!["checkpoint:board-1".to_owned()],
+            })
+            .unwrap();
+        store
+            .record_route_decision(&RouteDecisionRequest {
+                decision_id: "core-1-implemented".to_owned(),
+                project_id: "gareji-core".to_owned(),
+                work_item_id: "CORE-1".to_owned(),
+                expected_current_node_id: "implement".to_owned(),
+                signal: ControlSignal::Succeeded,
+                proposed_route_id: None,
+                evidence_refs: vec!["checkpoint:core-1".to_owned()],
+            })
+            .unwrap();
+        store
+            .record_route_decision(&RouteDecisionRequest {
+                decision_id: "board-1-verified".to_owned(),
+                project_id: "gareji-board".to_owned(),
+                work_item_id: "BOARD-1".to_owned(),
+                expected_current_node_id: "verify".to_owned(),
+                signal: ControlSignal::Passed,
+                proposed_route_id: None,
+                evidence_refs: vec!["test:cargo-test-workspace".to_owned()],
+            })
+            .unwrap();
+
+        let history = store.load_project_route_decisions("gareji-board").unwrap();
+
+        assert_eq!(history.len(), 2);
+        assert_eq!(history[0].decision_id, "board-1-implemented");
+        assert_eq!(history[1].decision_id, "board-1-verified");
+        assert!(
+            history
+                .iter()
+                .all(|decision| decision.project_id == "gareji-board")
+        );
+    }
+
+    #[test]
+    fn builtin_control_graphs_are_available_idempotently() {
+        let mut store = SqliteBoardStore::open_in_memory().unwrap();
+
+        assert_eq!(store.ensure_builtin_control_graphs().unwrap(), 3);
+        assert_eq!(store.ensure_builtin_control_graphs().unwrap(), 0);
+
+        let identities = store
+            .load_control_graph_revisions()
+            .unwrap()
+            .into_iter()
+            .map(|graph| (graph.graph_id, graph.revision_id))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            identities,
+            vec![
+                ("direct".to_owned(), "v1".to_owned()),
+                ("high-risk".to_owned(), "v1".to_owned()),
+                ("reviewed".to_owned(), "v1".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn builtin_portfolio_orchestration_is_available_idempotently() {
+        let mut store = SqliteBoardStore::open_in_memory().unwrap();
+
+        assert_eq!(store.ensure_builtin_portfolio_orchestrations().unwrap(), 1);
+        assert_eq!(store.ensure_builtin_portfolio_orchestrations().unwrap(), 0);
+
+        let revisions = store.load_portfolio_orchestration_revisions().unwrap();
+        assert_eq!(revisions.len(), 1);
+        assert_eq!(revisions[0].orchestration_id, "managed-products");
+        assert_eq!(revisions[0].revision_id, "v2");
+        assert_eq!(revisions[0].nodes.len(), 3);
+        assert_eq!(revisions[0].routes.len(), 4);
+        assert!(matches!(
+            revisions[0].nodes[0].kind,
+            PortfolioNodeKind::ProjectSelector {
+                selector: PortfolioProjectSelector::AllManaged
+            }
+        ));
+    }
+
+    #[test]
+    fn portfolio_ticks_are_atomic_and_append_only() {
+        let mut store = SqliteBoardStore::open_in_memory().unwrap();
+        store.ensure_builtin_portfolio_orchestrations().unwrap();
+        let first_run = PortfolioRun {
+            run_id: "run-1".to_owned(),
+            orchestration_id: "managed-products".to_owned(),
+            revision_id: "v2".to_owned(),
+            current_node_id: "summary".to_owned(),
+            status: PortfolioRunStatus::Active,
+            completed_steps: 1,
+            next_tick_at_epoch_seconds: Some(3_600),
+        };
+        let first_step = PortfolioRunStep {
+            run_id: "run-1".to_owned(),
+            sequence: 1,
+            node_id: "select-project".to_owned(),
+            signal: Some(PortfolioSignal::NoCandidate),
+            destination_node_id: Some("summary".to_owned()),
+            selected_project_id: None,
+            recorded_at_epoch_seconds: 0,
+        };
+
+        store
+            .record_portfolio_tick(None, &first_run, &first_step)
+            .unwrap();
+        assert_eq!(
+            store
+                .load_latest_portfolio_run("managed-products", "v2")
+                .unwrap(),
+            Some(first_run.clone())
+        );
+        assert_eq!(
+            store.load_portfolio_run_steps("run-1").unwrap(),
+            vec![first_step]
+        );
+
+        let stale = PortfolioRun {
+            completed_steps: 2,
+            ..first_run.clone()
+        };
+        assert!(matches!(
+            store.record_portfolio_tick(
+                None,
+                &stale,
+                &PortfolioRunStep {
+                    run_id: "run-1".to_owned(),
+                    sequence: 2,
+                    node_id: "summary".to_owned(),
+                    signal: Some(PortfolioSignal::Completed),
+                    destination_node_id: Some("finish".to_owned()),
+                    selected_project_id: None,
+                    recorded_at_epoch_seconds: 1,
+                }
+            ),
+            Err(StoreError::ConcurrentChange)
+        ));
+    }
+
+    #[test]
+    fn portfolio_restart_compares_the_latest_completed_run() {
+        let mut store = SqliteBoardStore::open_in_memory().unwrap();
+        store.ensure_builtin_portfolio_orchestrations().unwrap();
+        let completed = PortfolioRun {
+            run_id: "completed-run".to_owned(),
+            orchestration_id: "managed-products".to_owned(),
+            revision_id: "v2".to_owned(),
+            current_node_id: "finish".to_owned(),
+            status: PortfolioRunStatus::Completed,
+            completed_steps: 1,
+            next_tick_at_epoch_seconds: Some(3_600),
+        };
+        let completed_step = PortfolioRunStep {
+            run_id: completed.run_id.clone(),
+            sequence: 1,
+            node_id: "finish".to_owned(),
+            signal: None,
+            destination_node_id: None,
+            selected_project_id: None,
+            recorded_at_epoch_seconds: 0,
+        };
+        store
+            .record_portfolio_tick(None, &completed, &completed_step)
+            .unwrap();
+
+        let restarted = PortfolioRun {
+            run_id: "restarted-run".to_owned(),
+            orchestration_id: completed.orchestration_id.clone(),
+            revision_id: completed.revision_id.clone(),
+            current_node_id: "summary".to_owned(),
+            status: PortfolioRunStatus::Active,
+            completed_steps: 1,
+            next_tick_at_epoch_seconds: Some(7_200),
+        };
+        let restarted_step = PortfolioRunStep {
+            run_id: restarted.run_id.clone(),
+            sequence: 1,
+            node_id: "select-project".to_owned(),
+            signal: Some(PortfolioSignal::NoCandidate),
+            destination_node_id: Some("summary".to_owned()),
+            selected_project_id: None,
+            recorded_at_epoch_seconds: 3_600,
+        };
+        store
+            .record_portfolio_tick(Some(&completed), &restarted, &restarted_step)
+            .unwrap();
+
+        let rival = PortfolioRun {
+            run_id: "rival-run".to_owned(),
+            ..restarted.clone()
+        };
+        let rival_step = PortfolioRunStep {
+            run_id: rival.run_id.clone(),
+            ..restarted_step
+        };
+        assert!(matches!(
+            store.record_portfolio_tick(Some(&completed), &rival, &rival_step),
+            Err(StoreError::ConcurrentChange)
+        ));
+        assert_eq!(
+            store
+                .load_latest_portfolio_run("managed-products", "v2")
+                .unwrap(),
+            Some(restarted)
+        );
+    }
+
+    #[test]
+    fn portfolio_schedule_control_pauses_and_resumes_without_changing_the_run() {
+        let mut store = SqliteBoardStore::open_in_memory().unwrap();
+        store.ensure_builtin_portfolio_orchestrations().unwrap();
+        let revision = store
+            .load_portfolio_orchestration_revisions()
+            .unwrap()
+            .remove(0);
+        let active = store.load_portfolio_schedule_control(&revision).unwrap();
+        assert!(active.automatic_ticks_enabled);
+
+        let paused = PortfolioScheduleControl {
+            automatic_ticks_enabled: false,
+            ..active.clone()
+        };
+        let receipt = store
+            .save_portfolio_schedule_control(&PortfolioScheduleControlSaveRequest {
+                expected: active.clone(),
+                target: paused.clone(),
+            })
+            .unwrap();
+        assert!(receipt.changed);
+        assert_eq!(
+            store.load_portfolio_schedule_control(&revision).unwrap(),
+            paused
+        );
+
+        let resumed = PortfolioScheduleControl {
+            automatic_ticks_enabled: true,
+            ..paused.clone()
+        };
+        store
+            .save_portfolio_schedule_control(&PortfolioScheduleControlSaveRequest {
+                expected: paused.clone(),
+                target: resumed.clone(),
+            })
+            .unwrap();
+        assert_eq!(
+            store.load_portfolio_schedule_control(&revision).unwrap(),
+            resumed
+        );
+
+        assert!(matches!(
+            store.save_portfolio_schedule_control(&PortfolioScheduleControlSaveRequest {
+                expected: paused.clone(),
+                target: paused,
+            }),
+            Err(StoreError::ConcurrentChange)
+        ));
+    }
+
+    #[test]
+    fn builtin_orchestration_blueprint_is_portable_and_idempotent() {
+        let mut store = SqliteBoardStore::open_in_memory().unwrap();
+
+        assert_eq!(store.ensure_builtin_orchestration_blueprints().unwrap(), 1);
+        assert_eq!(store.ensure_builtin_orchestration_blueprints().unwrap(), 0);
+
+        let revisions = store.load_orchestration_blueprint_revisions().unwrap();
+        assert_eq!(revisions.len(), 1);
+        assert_eq!(revisions[0].blueprint_id, "evidence-first");
+        assert_eq!(revisions[0].scope, BlueprintScope::Project);
+        assert_eq!(revisions[0].approach_ids(), vec!["evidence-first"]);
+    }
+
+    #[test]
+    fn accepted_blueprint_application_pins_runtime_facts_without_starting_work() {
+        let mut store = SqliteBoardStore::open_in_memory().unwrap();
+        store.seed_sample_if_empty().unwrap();
+        store.ensure_builtin_orchestration_blueprints().unwrap();
+        let application = BlueprintApplication {
+            application_id: "application-core-2".to_owned(),
+            blueprint_id: "evidence-first".to_owned(),
+            revision_id: "v1".to_owned(),
+            entry_node_id: "approach".to_owned(),
+            project_id: "gareji-core".to_owned(),
+            work_item_id: "CORE-2".to_owned(),
+        };
+        let runtime_binding = BlueprintRuntimeBinding {
+            application_id: application.application_id.clone(),
+            project_id: application.project_id.clone(),
+            work_item_id: application.work_item_id.clone(),
+            agent_profile_id: "implementer".to_owned(),
+            execution_workspace: ExecutionWorkspaceConnection {
+                project_id: application.project_id.clone(),
+                kind: ExecutionWorkspaceKind::BundledSample,
+                location: None,
+            },
+            approach_notes: vec![BlueprintApproachNotePin {
+                approach_id: "evidence-first".to_owned(),
+                absolute_path: std::env::current_dir()
+                    .unwrap()
+                    .join("evidence-first.md")
+                    .to_string_lossy()
+                    .into_owned(),
+                fingerprint: "a".repeat(64),
+            }],
+        };
+
+        let first = store
+            .accept_blueprint_application(&application, &runtime_binding)
+            .unwrap();
+        store
+            .connection
+            .execute(
+                "UPDATE board_work_items SET agent_profile_id = 'reviewer' WHERE id = 'CORE-2'",
+                [],
+            )
+            .unwrap();
+        let retry = store
+            .accept_blueprint_application(&application, &runtime_binding)
+            .unwrap();
+
+        assert!(first.created);
+        assert!(!retry.created);
+        assert_eq!(store.load_blueprint_applications().unwrap(), vec![retry]);
+        assert_eq!(
+            store
+                .assess_active_work("gareji-core", "CORE-2")
+                .unwrap()
+                .state,
+            WorkItemState::Todo
+        );
+    }
+
+    #[test]
+    fn route_decision_pins_the_work_item_and_advances_its_current_node() {
+        let mut store = SqliteBoardStore::open_in_memory().unwrap();
+        store.seed_sample_if_empty().unwrap();
+        store.ensure_builtin_control_graphs().unwrap();
+        store
+            .save_project_graph_binding(&ProjectGraphBindingSaveRequest {
+                expected: None,
+                target: ProjectGraphBinding {
+                    project_id: "gareji-board".to_owned(),
+                    graph_id: "direct".to_owned(),
+                    revision_id: "v1".to_owned(),
+                    entry_id: "standard".to_owned(),
+                },
+            })
+            .unwrap();
+        let request = RouteDecisionRequest {
+            decision_id: "board-1-implementation-complete".to_owned(),
+            project_id: "gareji-board".to_owned(),
+            work_item_id: "BOARD-1".to_owned(),
+            expected_current_node_id: "implement".to_owned(),
+            signal: ControlSignal::Succeeded,
+            proposed_route_id: Some("implementation-complete".to_owned()),
+            evidence_refs: vec!["checkpoint:cp-board-1".to_owned()],
+        };
+
+        let first = store.record_route_decision(&request).unwrap();
+        let retry = store.record_route_decision(&request).unwrap();
+
+        assert!(first.recorded);
+        assert!(!retry.recorded);
+        assert_eq!(first.decision.route_id, "implementation-complete");
+        assert_eq!(first.resulting_position.current_node_id, "verify");
+        assert_eq!(first.resulting_position.graph_id, "direct");
+        assert_eq!(
+            store.load_route_decisions("BOARD-1").unwrap(),
+            vec![first.decision]
+        );
+        assert_eq!(
+            store.load_work_item_graph_positions().unwrap(),
+            vec![first.resulting_position]
+        );
+    }
+
+    #[test]
+    fn current_agent_loop_becomes_a_concrete_runner_target() {
+        let mut store = SqliteBoardStore::open_in_memory().unwrap();
+        store.seed_sample_if_empty().unwrap();
+        store.ensure_builtin_control_graphs().unwrap();
+        store
+            .save_project_graph_binding(&ProjectGraphBindingSaveRequest {
+                expected: None,
+                target: ProjectGraphBinding {
+                    project_id: "gareji-board".to_owned(),
+                    graph_id: "reviewed".to_owned(),
+                    revision_id: "v1".to_owned(),
+                    entry_id: "standard".to_owned(),
+                },
+            })
+            .unwrap();
+        store
+            .record_route_decision(&RouteDecisionRequest {
+                decision_id: "board-1-research-complete".to_owned(),
+                project_id: "gareji-board".to_owned(),
+                work_item_id: "BOARD-1".to_owned(),
+                expected_current_node_id: "research".to_owned(),
+                signal: ControlSignal::Succeeded,
+                proposed_route_id: Some("research-complete".to_owned()),
+                evidence_refs: vec!["checkpoint:cp-research".to_owned()],
+            })
+            .unwrap();
+
+        let target = store.load_agent_loop_execution_target("BOARD-1").unwrap();
+
+        assert_eq!(target.graph_id, "reviewed");
+        assert_eq!(target.revision_id, "v1");
+        assert_eq!(target.node_id, "implement");
+        assert_eq!(target.agent_profile_id, "implementer");
+    }
+
+    #[test]
+    fn runner_preparation_pins_the_entry_agent_loop_before_the_first_decision() {
+        let mut store = SqliteBoardStore::open_in_memory().unwrap();
+        store.seed_sample_if_empty().unwrap();
+        store.ensure_builtin_control_graphs().unwrap();
+        store
+            .save_project_graph_binding(&ProjectGraphBindingSaveRequest {
+                expected: None,
+                target: ProjectGraphBinding {
+                    project_id: "gareji-board".to_owned(),
+                    graph_id: "reviewed".to_owned(),
+                    revision_id: "v1".to_owned(),
+                    entry_id: "standard".to_owned(),
+                },
+            })
+            .unwrap();
+
+        let target = store
+            .prepare_agent_loop_execution_target("gareji-board", "BOARD-1")
+            .unwrap();
+
+        assert_eq!(target.node_id, "research");
+        assert_eq!(target.agent_profile_id, "researcher");
+        assert_eq!(
+            store.load_work_item_graph_positions().unwrap(),
+            vec![WorkItemGraphPosition {
+                project_id: "gareji-board".to_owned(),
+                work_item_id: "BOARD-1".to_owned(),
+                graph_id: "reviewed".to_owned(),
+                revision_id: "v1".to_owned(),
+                entry_id: "standard".to_owned(),
+                current_node_id: "research".to_owned(),
+            }]
+        );
+    }
+
+    #[test]
+    fn runner_preparation_does_not_pin_ineligible_work() {
+        let mut store = SqliteBoardStore::open_in_memory().unwrap();
+        store.seed_sample_if_empty().unwrap();
+        store.ensure_builtin_control_graphs().unwrap();
+        store
+            .save_project_graph_binding(&ProjectGraphBindingSaveRequest {
+                expected: None,
+                target: ProjectGraphBinding {
+                    project_id: "zettelkasten-plugin".to_owned(),
+                    graph_id: "direct".to_owned(),
+                    revision_id: "v1".to_owned(),
+                    entry_id: "standard".to_owned(),
+                },
+            })
+            .unwrap();
+
+        assert!(matches!(
+            store.prepare_agent_loop_execution_target("zettelkasten-plugin", "ZETTEL-1"),
+            Err(StoreError::InvalidRequest)
+        ));
+        assert!(store.load_work_item_graph_positions().unwrap().is_empty());
+    }
+
+    fn reviewed_graph() -> ControlGraphRevision {
+        ControlGraphRevision {
+            graph_id: "reviewed".to_owned(),
+            revision_id: "v1".to_owned(),
+            entries: vec![GraphEntry {
+                id: "standard".to_owned(),
+                node_id: "implement".to_owned(),
+            }],
+            nodes: vec![
+                ControlNode {
+                    id: "implement".to_owned(),
+                    kind: ControlNodeKind::AgentLoop {
+                        agent_profile_id: "implementer".to_owned(),
+                    },
+                },
+                ControlNode {
+                    id: "verify".to_owned(),
+                    kind: ControlNodeKind::Audit,
+                },
+                ControlNode {
+                    id: "finish".to_owned(),
+                    kind: ControlNodeKind::Terminal,
+                },
+            ],
+            routes: vec![
+                ControlRoute {
+                    id: "implementation-complete".to_owned(),
+                    source_node_id: "implement".to_owned(),
+                    destination_node_id: "verify".to_owned(),
+                    signal: ControlSignal::Succeeded,
+                },
+                ControlRoute {
+                    id: "verification-passed".to_owned(),
+                    source_node_id: "verify".to_owned(),
+                    destination_node_id: "finish".to_owned(),
+                    signal: ControlSignal::Passed,
+                },
+            ],
+            anchors: vec![GraphAnchor {
+                id: "tests-ran".to_owned(),
+                description: "Verification is grounded in tests that actually ran".to_owned(),
+            }],
+        }
+    }
 
     #[test]
     fn sample_seed_is_idempotent_and_loads_one_query_read_model() {
@@ -3111,7 +6407,7 @@ mod tests {
             .connection
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 8);
+        assert_eq!(version, 15);
         let table_exists: bool = store
             .connection
             .query_row(
@@ -3124,6 +6420,27 @@ mod tests {
             )
             .unwrap();
         assert!(table_exists);
+        for table in [
+            "board_control_graph_revisions",
+            "board_project_graph_bindings",
+            "board_graph_canvas_layouts",
+            "board_work_item_graph_positions",
+            "board_route_decisions",
+            "board_graph_rewrite_proposals",
+        ] {
+            let exists: bool = store
+                .connection
+                .query_row(
+                    "SELECT EXISTS(
+                       SELECT 1 FROM sqlite_master
+                       WHERE type = 'table' AND name = ?1
+                     )",
+                    [table],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert!(exists, "missing {table}");
+        }
     }
 
     #[test]

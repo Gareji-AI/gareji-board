@@ -130,6 +130,37 @@ Runnable candidates are ranked deterministically by:
 
 The preview reports state-ineligible, project-capacity, approval-required, first-unresolved-dependency, unassigned, missing-Agent-capability, and lower-ranked candidates separately so the person can understand the result. Reaching the configured global concurrency cap or finding no runnable candidate returns `decision=continue`, no candidate, and `fast_exit_required=true`; it is not a failure. A zero global cap, a duplicate Work item or Agent profile identity, a Work item whose project is missing from the portfolio, a dependency whose Work item is missing, or an assignment whose Agent profile is missing fails closed with `decision=stop`, no candidate, and `fast_exit_required=true`.
 
+## Project Control graph routing
+
+The existing candidate preview decides which eligible Work item may proceed. A Project Control graph is a separate, subsequent decision about which focused Agent loop or deterministic stage should receive that work. It does not change candidate ranking, Work item dependency semantics, or Core capability policy.
+
+A Board project selects an immutable Graph revision and named Graph entry. Each in-flight route decision remains pinned to that revision. Safe Autopilot evaluates only routes declared from the current Control node for the observed bounded signal. It fails closed when the graph, node, route, signal, evidence, approval, or policy conditions are missing or ambiguous.
+
+A model may propose one declared route but cannot create a next node, edge, Agent profile, or executable operation. Board records the accepted or rejected Route decision with evidence references before asking Runner to execute a concrete selected stage. Runner does not choose graph topology, and Core does not receive graph-specific payloads.
+
+Before the first Agent Loop executes, Board pins the eligible Work item to the Project's selected Graph revision, entry, and entry node. Preparing the same Work item again preserves that position. `backlog`, `blocked`, `done`, and `cancelled` Work items cannot be pinned. A later Project graph binding change affects future Work items only.
+
+After a bounded signal is observed, Safe Autopilot resolves the unique declared route from the pinned current node. An optional model-proposed route must equal that deterministic result. Board stores the accepted decision and advances the current node atomically; identical retries are idempotent, while stale-current-node requests fail as concurrent changes. When the current node is an Agent Loop, Board resolves its Agent profile as concrete Runner scheduling input. Runner still repeats workspace, behavior, approval, and capability preflight.
+
+The pinned Control node determines which action the desktop may offer:
+
+- an Agent Loop constructs and preflights one Runner request;
+- a Gate or Audit requires an explicit evidence reference and selects one declared route;
+- an Approval requires an explicit human action and accepts only an `approved` or `rejected` route;
+- a Terminal reports Graph completion and offers no execution action.
+
+An `approved` signal can originate only from an Approval node. Graph validation rejects revisions that assign that authority to an Agent Loop, Gate, Audit, or Terminal node.
+
+The desktop presents accepted Route decisions as a read-only per-Project history in their durable recording order. It displays the Work item, Signal, source and next node, selected route, and bounded evidence references directly from Board's immutable records; the visualization does not reconstruct or infer missing decisions.
+
+Runner graph completion records the Runner result through Core before attempting graph advancement. The resulting Core Checkpoint identity becomes the Route decision's evidence reference. A successfully completed Agent Loop maps to the unique declared `succeeded`, `passed`, or `needs_approval` route from the current node. A progress handoff keeps the node unchanged. A blocked, failed, or timed-out Run maps to a declared `failed` or `rejected` route when exactly one exists; otherwise Board pauses on the current node with an explicit no-declared-failure-route result.
+
+The Runner request's Agent profile and Work item assignment must both match the current Agent Loop execution target. A result from another Agent profile, a substituted Work item or project, inconsistent Runner/Checkpoint outcomes, or multiple matching routes fails closed. If Core accepted the Checkpoint but graph advancement fails, the combined completion receipt preserves the durable Progress result alongside the graph error so evidence is never hidden.
+
+Runtime evidence may create a Graph rewrite proposal, such as adding independent review after clustered failures or collapsing fan-out when budget exceeds verified progress. A proposal produces a new candidate revision and never mutates the revision used by active work. Changes to anchors, frozen rules, approvals, audits, publishing, or authority require explicit human approval.
+
+The first writable rewrite operation is deliberately narrower: a human can propose replacing the Agent profile of one existing Agent Loop. The complete candidate revision, rationale, and evidence are stored separately from the Graph catalog. Only explicit approval publishes and selects that revision for future work; rejection publishes nothing, and either decision leaves already pinned Work items on their source revision.
+
 Work items created from the Activity Inbox receive priority `100` and no Agent assignment until a person records an Agent plan. The bundled desktop sample uses a global preview concurrency cap of `2`.
 
 ## Compatibility defaults

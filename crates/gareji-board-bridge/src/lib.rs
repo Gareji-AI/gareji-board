@@ -139,7 +139,22 @@ fn map_store_error(request_id: String, error: &StoreError) -> BoardBridgeRespons
         ),
         StoreError::CheckpointAlreadyLinked
         | StoreError::ProjectAlreadyExists
+        | StoreError::GraphRevisionAlreadyExists
+        | StoreError::BlueprintRevisionAlreadyExists
+        | StoreError::BlueprintRevisionNotFound
+        | StoreError::BlueprintApplicationAlreadyExists
+        | StoreError::PortfolioOrchestrationRevisionAlreadyExists
+        | StoreError::GraphRewriteProposalAlreadyExists
+        | StoreError::GraphRewriteProposalNotFound
+        | StoreError::GraphRewriteProposalAlreadyDecided
+        | StoreError::GraphRevisionNotFound
+        | StoreError::ProjectGraphBindingNotFound
+        | StoreError::RouteDecisionAlreadyExists
+        | StoreError::RouteNotSelected
+        | StoreError::WorkItemGraphPositionNotFound
+        | StoreError::ControlNodeNotExecutable
         | StoreError::AgentProfileNotFound
+        | StoreError::ExecutionWorkspaceNotFound
         | StoreError::AgentProfileAlreadyExists
         | StoreError::WorkItemAlreadyExists
         | StoreError::AlreadyAttached
@@ -148,6 +163,7 @@ fn map_store_error(request_id: String, error: &StoreError) -> BoardBridgeRespons
         | StoreError::ConcurrentChange
         | StoreError::CreateDirectory(_)
         | StoreError::Sqlite(_)
+        | StoreError::Json(_)
         | StoreError::CorruptState(_) => error_response(
             request_id,
             BoardBridgeErrorCode::InternalError,

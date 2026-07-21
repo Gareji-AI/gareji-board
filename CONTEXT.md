@@ -102,6 +102,98 @@ _Avoid_: Core permission, inferred branch match
 The default deterministic control policy for safe selection, reconciliation, stopping, and fast exit. It is a stable built-in profile that future custom policies may replace explicitly.
 _Avoid_: scheduler, agent, runtime
 
+**Control graph**:
+A Board-owned, versioned description of the allowed control flow among focused Agent loops, deterministic gates, audits, approvals, and terminal outcomes. It governs organization and routing without replacing Work item dependencies or Core capability policy.
+_Avoid_: Work item graph, runtime workflow, prompt chain
+
+**Orchestration Blueprint**:
+A project-independent, immutable graph describing a reusable way to organize approaches, gates, audits, approvals, and terminal outcomes. It declares required facts and capabilities without naming a concrete Board project, Agent profile, or Execution workspace.
+_Avoid_: Project workflow, fixed project graph, prompt chain
+
+**Approach Note**:
+A Markdown knowledge artifact describing one reusable way to perform work, including its applicability, required capabilities, typed inputs, expected outputs, risk, and evidence requirements.
+_Avoid_: prompt, Agent profile, Work item
+
+**Note Socket**:
+A typed connection point through which an Approach Note receives context or work and produces evidence, artifacts, signals, or approval requests inside an Orchestration Blueprint.
+_Avoid_: arbitrary attachment, untyped edge, file copy
+
+**Control node**:
+One named stage in a Control graph. A node may invoke an Agent profile or represent a deterministic gate, audit, approval boundary, or terminal outcome; it is a description of allowed control, not a running agent.
+_Avoid_: agent process, Work item, Run
+
+**Control route**:
+A named, typed edge from one Control node to another that may be selected only for its declared signal and policy conditions. A route describes allowed movement; selecting it does not itself start a Run or grant a capability.
+_Avoid_: Work item dependency, arbitrary next prompt, Core permission
+
+**Graph revision**:
+An immutable version of one Control graph. Project configuration and in-flight route decisions refer to an exact revision so later edits cannot silently change active work.
+_Avoid_: mutable graph, current topology
+
+**Graph entry**:
+A named permitted starting Control node in one Graph revision. A graph may expose several entries for different work shapes, so `root` is reserved for the human-owned root goal rather than used as an entry synonym.
+_Avoid_: graph root, first Work item
+
+**Project graph binding**:
+The Board-owned selection of a Graph revision and Graph entry for one Board project. It establishes the project's default organization without assigning a Work item or starting a Run.
+_Avoid_: Agent plan, Runner configuration, Work item dependency
+
+**Blueprint Application**:
+An inspectable proposal or accepted intent to use one exact Orchestration Blueprint revision and entry for a concrete Board project and Work item candidate. It does not itself select an Agent profile, start a Runner, or grant a capability.
+_Avoid_: Project graph binding, Run, automatic graph mutation
+
+**Runtime Binding**:
+The immutable execution-time resolution of one Blueprint Application to a concrete Board project, Work item, Agent profiles, Approach Note fingerprints, and Execution workspace.
+_Avoid_: Orchestration Blueprint, mutable project configuration, Core capability grant
+
+**Portfolio orchestration graph**:
+A Board-owned, versioned description of how coordination moves among Project Selectors, Blueprint Applications, and bounded post-actions. Concrete projects and execution targets remain unresolved until an accepted application creates a Runtime Binding.
+_Avoid_: global Control graph, project-internal workflow, remote scheduler
+
+**Portfolio orchestration node**:
+One stage in a Portfolio orchestration graph: a Project Selector, a bounded post-action, or a terminal outcome. It describes coordination intent and does not itself start a Runner.
+_Avoid_: Control node, Work item, agent process
+
+**Project Selector**:
+A Portfolio orchestration node that deterministically finds eligible work across all or an explicit subset of managed Board projects without fixing one project into the graph.
+_Avoid_: fixed Project Invocation, repository scan, direct Runner request
+
+**Portfolio schedule**:
+The manual or interval cadence configured for a Portfolio orchestration graph. A schedule is inert configuration until a local scheduler creates a Portfolio Run.
+_Avoid_: running timer, Run state, Core authority
+
+**Portfolio schedule control**:
+The runtime decision to permit or pause automatic ticks for one immutable Portfolio schedule. Pausing it preserves the current Portfolio Run and does not block an explicit manual tick.
+_Avoid_: Run pause, graph revision, scheduler configuration
+
+**Portfolio Run**:
+One durable execution of a Portfolio orchestration graph, advancing at most one bounded node per scheduled tick unless an explicitly approved policy says otherwise.
+_Avoid_: Runner Run, Control graph position, hidden background loop
+
+**Route decision**:
+An immutable Board-owned record of the current Control node, observed signal, selected Control route, policy result, evidence references, and resulting next node. A model may propose a route, but deterministic Board policy accepts or rejects it.
+_Avoid_: model thought, Run outcome, Checkpoint
+
+**Work item graph position**:
+The Board-owned pin of one eligible Work item to an exact Graph revision, entry, and current Control node. It is created before the first Agent Loop execution and advances only with an accepted Route decision, so later Project graph binding changes cannot redirect in-flight work.
+_Avoid_: Work item state, Run state, Project graph binding
+
+**Agent Loop execution target**:
+The concrete Agent profile identity resolved from one Work item's current Agent Loop Control node. It is scheduling input for constructing a Runner request and does not start a Run, trust Agent behavior, or grant a Core capability.
+_Avoid_: Run, agent process, Core permission
+
+**Runner graph completion**:
+The Board controller operation that first records a started Runner result as a Core Progress Checkpoint and then uses that accepted Checkpoint as evidence for one bounded graph effect. Progress keeps the current node, completion may advance one declared success route, and failure without a declared failure route pauses in place.
+_Avoid_: Work item transition, hidden callback, automatic retry
+
+**Graph rewrite proposal**:
+A recorded suggestion to produce a new Graph revision by adding, removing, promoting, collapsing, or reconnecting Control nodes and routes. It never mutates an in-flight Graph revision and material authority changes require explicit human approval.
+_Avoid_: self-modifying graph, route decision
+
+**Graph anchor**:
+A human-owned goal, frozen rule, or independently evidenced real-world measure that the Control graph cannot rewrite through its own optimization routes. Core capability policy remains an external authority boundary rather than a Graph anchor stored by Board.
+_Avoid_: ordinary metric, model preference
+
 **Run state**:
 The lifecycle of one execution attempt for a Work item. It remains separate from Work item state so a failed or cancelled Run can be reconciled into the appropriate visible work state.
 _Avoid_: Work item state
