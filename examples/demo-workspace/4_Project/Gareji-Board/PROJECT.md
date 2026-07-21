@@ -1,8 +1,8 @@
-# Gareji Board
+# Gareji Board · Sample
 
 ## Purpose
 
-Make multi-project AI work visible and controllable without requiring users to write orchestration code.
+Demonstrate multi-project AI work using only an application-owned local fixture.
 
 ## Current focus
 

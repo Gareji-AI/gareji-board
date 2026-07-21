@@ -1,8 +1,8 @@
-# Gareji Core
+# Gareji Core · Sample
 
 ## Purpose
 
-Provide trusted process execution, compact handoffs, bounded failure categories, and durable audit evidence.
+Demonstrate trusted process execution, compact handoffs, bounded failure categories, and durable audit evidence with fixture data.
 
 ## Current focus
 

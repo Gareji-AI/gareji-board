@@ -1,8 +1,8 @@
-# Zettelkasten Plugin
+# Sample Knowledge Plugin
 
 ## Purpose
 
-Connect a Markdown Zettelkasten to Gareji Board without requiring Obsidian or treating one folder layout as part of the Zettelkasten method.
+Demonstrate a Markdown Knowledge Adapter without installing a product plugin, requiring Obsidian, or connecting a user's notes.
 
 ## Current focus
 

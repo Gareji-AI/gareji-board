@@ -13,6 +13,7 @@ path = "src/main.rs"
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
+include_dir.workspace = true
 gareji-board-domain.workspace = true
 gareji-board-core.workspace = true
 gareji-board-store.workspace = true
