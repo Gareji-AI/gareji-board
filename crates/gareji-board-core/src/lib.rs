@@ -5,6 +5,7 @@ mod blueprint_application;
 mod blueprint_draft;
 mod board_run;
 mod control_node;
+mod definition_editor;
 mod graph_draft;
 mod graph_rewrite;
 mod portfolio_draft;
@@ -24,6 +25,10 @@ pub use board_run::{BoardRunController, BoardRunError, BoardRunOutcome, Prepared
 pub use control_node::{
     ControlNodeController, ControlNodeError, ControlNodeTransitionReceipt, CurrentControlNode,
     EvidenceRouteRequest, HumanApprovalRequest, PermittedControlRoute,
+};
+pub use definition_editor::{
+    BlueprintEdit, BlueprintEditPlan, ControlGraphEdit, ControlGraphEditPlan, DefinitionEditor,
+    DefinitionEditorError,
 };
 pub use graph_draft::{GraphDraft, GraphDraftError};
 pub use graph_rewrite::{GraphRewriteController, GraphRewriteError};

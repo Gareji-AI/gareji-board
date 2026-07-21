@@ -1,10 +1,11 @@
 [CmdletBinding()]
 param(
-    [ValidateRange(1, 1440)]
-    [int]$IntervalMinutes = 5,
-    [string]$TaskName = "Gareji Board Portfolio Scheduler",
+    [ValidateRange(1, 3600)]
+    [int]$PollIntervalSeconds = 30,
+    [string]$TaskName = "Gareji Board Portfolio Daemon",
     [string]$Database,
-    [switch]$SkipBuild
+    [switch]$SkipBuild,
+    [switch]$NoStart
 )
 
 $ErrorActionPreference = "Stop"
@@ -21,26 +22,32 @@ if (-not (Test-Path -LiteralPath $executable -PathType Leaf)) {
     throw "Scheduler executable not found at $executable. Run again without -SkipBuild."
 }
 
-$arguments = "portfolio-tick-due"
+$arguments = "portfolio-daemon --poll-interval-seconds $PollIntervalSeconds"
 if ($Database) {
     $databasePath = [System.IO.Path]::GetFullPath($Database)
     $arguments = "--database `"$databasePath`" $arguments"
 }
 
 $action = New-ScheduledTaskAction -Execute $executable -Argument $arguments
-$trigger = New-ScheduledTaskTrigger `
-    -Once `
-    -At (Get-Date).AddMinutes(1) `
-    -RepetitionInterval (New-TimeSpan -Minutes $IntervalMinutes)
+$trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
 $settings = New-ScheduledTaskSettingsSet `
     -MultipleInstances IgnoreNew `
     -StartWhenAvailable `
-    -ExecutionTimeLimit (New-TimeSpan -Minutes 2)
+    -ExecutionTimeLimit ([TimeSpan]::Zero) `
+    -RestartCount 3 `
+    -RestartInterval (New-TimeSpan -Minutes 1) `
+    -Hidden
 
-Register-ScheduledTask `
+$registeredTask = Register-ScheduledTask `
     -TaskName $TaskName `
     -Action $action `
     -Trigger $trigger `
     -Settings $settings `
-    -Description "Runs one bounded Gareji Board Portfolio scheduler pass." `
-    -Force | Select-Object TaskName, State
+    -Description "Runs the headless Gareji Board Portfolio scheduler while the user is logged in." `
+    -Force
+
+if (-not $NoStart) {
+    Start-ScheduledTask -TaskName $TaskName
+}
+
+$registeredTask | Select-Object TaskName, State
