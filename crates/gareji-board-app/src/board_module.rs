@@ -612,8 +612,7 @@ impl From<&ExecutionWorkspaceConnection> for ExecutionWorkspaceView {
         let display_name = connection
             .location
             .as_deref()
-            .and_then(|path| Path::new(path).file_name())
-            .and_then(|name| name.to_str())
+            .and_then(portable_path_name)
             .unwrap_or("Bundled sample")
             .to_owned();
         Self {
@@ -623,6 +622,10 @@ impl From<&ExecutionWorkspaceConnection> for ExecutionWorkspaceView {
             display_name,
         }
     }
+}
+
+fn portable_path_name(path: &str) -> Option<&str> {
+    path.rsplit(['/', '\\']).find(|segment| !segment.is_empty())
 }
 
 impl From<&ApproachNoteManifest> for ApproachNoteView {
@@ -892,14 +895,16 @@ mod tests {
     }
 
     #[test]
-    fn execution_workspace_view_keeps_the_full_path_out_of_the_primary_label() {
-        let connection = ExecutionWorkspaceConnection {
-            project_id: "board".to_owned(),
-            kind: ExecutionWorkspaceKind::LocalDirectory,
-            location: Some(String::from(r"C:\work\gareji-board")),
-        };
-        let view = ExecutionWorkspaceView::from(&connection);
-        assert_eq!(view.display_name, "gareji-board");
-        assert_eq!(view.location, connection.location);
+    fn execution_workspace_view_keeps_portable_paths_out_of_the_primary_label() {
+        for location in [r"C:\work\gareji-board", "/work/gareji-board"] {
+            let connection = ExecutionWorkspaceConnection {
+                project_id: "board".to_owned(),
+                kind: ExecutionWorkspaceKind::LocalDirectory,
+                location: Some(location.to_owned()),
+            };
+            let view = ExecutionWorkspaceView::from(&connection);
+            assert_eq!(view.display_name, "gareji-board");
+            assert_eq!(view.location, connection.location);
+        }
     }
 }
