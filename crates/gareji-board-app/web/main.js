@@ -1,4 +1,5 @@
 import { board } from "./api.js";
+import { agentLoopFeedback, runAgentLoopWithFeedback } from "./agent_loop_feedback.js";
 import { createConnectionGesture } from "./connection_gesture.js";
 import { canvasLayoutId, moveNode, positionsFromLayout, serializePositions } from "./node_layout.js";
 
@@ -18,6 +19,8 @@ const ui = {
   snapshot: null,
   preview: null,
   busy: false,
+  activeAgentLoop: null,
+  agentLoopTimer: null,
   graphProjectId: null,
   graphDraft: null,
   graphPositions: new Map(),
@@ -79,13 +82,39 @@ async function run(action, successMessage) {
   }
 }
 
+function waitForVisiblePaint() {
+  return new Promise((resolve) => {
+    window.requestAnimationFrame(() => window.requestAnimationFrame(resolve));
+  });
+}
+
+function refreshAgentLoopFeedback() {
+  const feedback = agentLoopFeedback(ui.activeAgentLoop);
+  const status = document.querySelector("[data-agent-loop-status]");
+  const button = document.querySelector("[data-action='start-candidate']");
+  if (feedback && status) status.textContent = feedback.status;
+  if (feedback && button) button.textContent = feedback.buttonLabel;
+}
+
+function updateActiveAgentLoop(activeRun) {
+  window.clearInterval(ui.agentLoopTimer);
+  ui.agentLoopTimer = null;
+  ui.activeAgentLoop = activeRun;
+  render();
+  if (activeRun) {
+    refreshAgentLoopFeedback();
+    ui.agentLoopTimer = window.setInterval(refreshAgentLoopFeedback, 1_000);
+  }
+}
+
 async function reload() {
   const snapshot = await board.load();
   ui.snapshot = snapshot;
   document.querySelector("#storage-label").textContent = snapshot.storageLabel;
+  const workspaceName = snapshot.demoWorkspace ? "Demo workspace" : "Local Board";
   document.querySelector("#connection-status").textContent = snapshot.warning
-    ? "Local Board · attention"
-    : "Local Board · ready";
+    ? `${workspaceName} · attention`
+    : `${workspaceName} · ready`;
   document.querySelector("#connection-status").dataset.tone = snapshot.warning ? "warning" : "ready";
   render();
 }
@@ -94,7 +123,7 @@ function render() {
   root.classList.toggle("fixed-workspace", Boolean(ui.workspace) || ui.page === "work");
   nav.innerHTML = NAV.map(([id, text]) => `
     <button type="button" data-nav="${id}" class="${ui.page === id && !ui.workspace ? "active" : ""}"
-      aria-current="${ui.page === id && !ui.workspace ? "page" : "false"}">${text}</button>
+      aria-current="${ui.page === id && !ui.workspace ? "page" : "false"}" ${ui.activeAgentLoop ? "disabled" : ""}>${text}</button>
   `).join("");
 
   if (!ui.snapshot) {
@@ -172,13 +201,15 @@ function metric(value, text) {
 function renderAutopilotPreview() {
   const preview = ui.preview;
   const candidate = preview.candidate;
+  const feedback = agentLoopFeedback(ui.activeAgentLoop);
   return `<section class="autopilot-preview" aria-label="Safe Autopilot preview">
-    <header><div><span class="kicker">Read-only evaluation</span><h2>Safe Autopilot</h2></div><button class="quiet-button" data-action="close-preview" type="button">Close</button></header>
+    <header><div><span class="kicker">Read-only evaluation</span><h2>Safe Autopilot</h2></div><button class="quiet-button" data-action="close-preview" type="button" ${ui.activeAgentLoop ? "disabled" : ""}>Close</button></header>
     <p>${escapeHtml(preview.summary)}</p>
     ${candidate ? `<div class="candidate-row">
       <div><strong>${escapeHtml(candidate.title)}</strong><span>${escapeHtml(candidate.workItemId)} · ${escapeHtml(candidate.projectName)} · ${escapeHtml(candidate.agentRole)}</span></div>
-      <div><small>${escapeHtml(candidate.capacity)}</small><button class="primary-button" data-action="start-candidate" data-work-item="${escapeHtml(candidate.workItemId)}" type="button" ${ui.busy ? "disabled" : ""}>Start current Agent Loop</button></div>
+      <div><small>${escapeHtml(candidate.capacity)}</small><button class="primary-button" data-action="start-candidate" data-work-item="${escapeHtml(candidate.workItemId)}" type="button" ${ui.busy ? "disabled" : ""}>${escapeHtml(feedback?.buttonLabel || "Start current Agent Loop")}</button></div>
     </div>` : ""}
+    ${feedback ? `<div class="agent-loop-progress" role="status" aria-live="polite"><i aria-hidden="true"></i><strong>Agent Loop in progress</strong><span data-agent-loop-status>${escapeHtml(feedback.status)}</span></div>` : ""}
     ${preview.skipped.length ? `<details><summary>${preview.skipped.length} skipped candidate(s)</summary><ul>${preview.skipped.map((item) => `<li><code>${escapeHtml(item.workItemId)}</code> ${escapeHtml(item.reason)}</li>`).join("")}</ul></details>` : ""}
   </section>`;
 }
@@ -229,23 +260,30 @@ function renderLane(state, items) {
 
 function renderProjects() {
   const { projects, executionWorkspaces } = ui.snapshot;
+  const demo = ui.snapshot.demoWorkspace;
+  const action = demo
+    ? ""
+    : `<button class="secondary-button" type="button" data-action="toggle-project-form">Add existing project</button>`;
+  const description = demo
+    ? "Disposable sample projects use local fixtures only; no product plugin or user repository is installed or connected."
+    : "Each project keeps its own capacity, execution workspace, and graph binding.";
   return `
-    ${pageHeader("Portfolio", "Projects", "Each project keeps its own capacity, execution workspace, and graph binding.",
-      `<button class="secondary-button" type="button" data-action="toggle-project-form">Add existing project</button>`)}
-    <form id="project-form" class="inline-form project-form collapsed" data-form="project">
+    ${pageHeader(demo ? "Sample portfolio" : "Portfolio", "Projects", description, action)}
+    ${demo ? `<aside class="demo-workspace-notice" role="note"><strong>Demo workspace</strong><span>Local fixtures only. No product plugin or user repository is installed or connected.</span></aside>` : ""}
+    ${demo ? "" : `<form id="project-form" class="inline-form project-form collapsed" data-form="project">
       <label>Stable ID<input name="projectId" required placeholder="my-product" /></label>
       <label>Name<input name="name" required maxlength="120" /></label>
       <label>Capacity<input name="executionCap" type="number" min="1" value="1" required /></label>
       <label>Local project directory<input name="workspaceLocation" required placeholder="C:\\work\\my-product" /></label>
       <button class="primary-button" type="submit">Connect project</button>
-    </form>
+    </form>`}
     <section class="project-grid">${projects.map((project) => {
       const workspace = executionWorkspaces.find((item) => item.projectId === project.id);
       return `<article class="project-card">
-        <header><span class="project-id">${escapeHtml(project.id)}</span><span class="health-label ${project.health}">${label(project.health)}</span></header>
+        <header><span class="project-id">${escapeHtml(project.id)}</span><span class="project-card-labels">${demo ? `<span class="sample-badge">SAMPLE</span>` : ""}<span class="health-label ${project.health}">${label(project.health)}</span></span></header>
         <h2>${escapeHtml(project.name)}</h2>
         <div class="project-stats"><span><strong>${project.activeRuns}/${project.executionCap}</strong> running</span><span><strong>${project.todoItems}</strong> todo</span><span><strong>${project.blockedItems}</strong> blocked</span></div>
-        <div class="workspace-connection"><span>Execution workspace</span><strong title="${escapeHtml(workspace?.location || "")}">${escapeHtml(workspace?.displayName || "Not connected")}</strong></div>
+        <div class="workspace-connection"><span>${demo ? "Sample execution workspace" : "Execution workspace"}</span><strong title="${demo ? "Application-owned demo copy" : escapeHtml(workspace?.location || "")}">${demo ? "Local fixture" : escapeHtml(workspace?.displayName || "Not connected")}</strong></div>
         <button class="secondary-button" type="button" data-open="graph" data-project="${escapeHtml(project.id)}">Open Control Graph</button>
       </article>`;
     }).join("")}</section>`;
@@ -384,9 +422,15 @@ function renderBlueprintWorkspace() {
     <div class="blueprint-grid">
       <aside class="blueprint-notes"><header><span>Approach notes</span><strong>${ui.snapshot.approachNotes.length}</strong></header>${ui.snapshot.approachNotes.map((note) => `<article><span class="risk ${note.risk}">${escapeHtml(note.risk)}</span><h2>${escapeHtml(note.title)}</h2><p>${escapeHtml(note.filename)}</p><div class="tag-row">${note.inputs.concat(note.outputs).map((socket) => `<span>${label(socket)}</span>`).join("")}</div><button class="secondary-button" type="button" data-add-approach="${escapeHtml(note.approachId)}">Add to graph</button></article>`).join("") || empty("No Approach Notes")}</aside>
       <section class="blueprint-canvas-panel"><header><div><span class="kicker">${escapeHtml(blueprint.blueprint_id)} · ${escapeHtml(blueprint.revision_id)}</span><h2>${escapeHtml(blueprint.name)}</h2></div><div>${["gate", "audit", "approval", "terminal"].map((kind) => `<button type="button" class="quiet-button" data-add-blueprint-node="${kind}">${label(kind)}</button>`).join("")}</div></header>${renderBlueprintCanvas(blueprint)}</section>
-      <aside class="blueprint-inspector"><span class="kicker">Inspector</span><h2>Portable contract</h2><dl><div><dt>Scope</dt><dd>${label(blueprint.scope)}</dd></div><div><dt>Entry</dt><dd>${escapeHtml(blueprint.entry_node_id)}</dd></div><div><dt>Nodes</dt><dd>${blueprint.nodes.length}</dd></div><div><dt>Connections</dt><dd>${blueprint.links.length}</dd></div></dl><label>New revision<input id="blueprint-revision-id" value="${escapeHtml(nextRevisionId(blueprint.revision_id))}" /></label><button class="primary-button" type="button" data-action="publish-blueprint">Publish immutable revision</button><div class="link-list">${blueprint.links.map((link) => `<div><span>${escapeHtml(link.source_node_id)} → ${escapeHtml(link.destination_node_id)}</span><button type="button" data-remove-blueprint-link="${escapeHtml(link.id)}">Remove</button></div>`).join("")}</div></aside>
+      <aside class="blueprint-inspector"><span class="kicker">Inspector</span><h2>Portable contract</h2><dl><div><dt>Scope</dt><dd>${label(blueprint.scope)}</dd></div><div><dt>Entry</dt><dd>${escapeHtml(blueprint.entry_node_id)}</dd></div><div><dt>Nodes</dt><dd>${blueprint.nodes.length}</dd></div><div><dt>Connections</dt><dd>${blueprint.links.length}</dd></div></dl><label>New revision<input id="blueprint-revision-id" value="${escapeHtml(nextRevisionId(blueprint.revision_id))}" /></label><button class="primary-button" type="button" data-action="publish-blueprint">Publish immutable revision</button><div class="link-list">${blueprint.links.map((link) => `<div><span><strong>${escapeHtml(link.source_node_id)} → ${escapeHtml(link.destination_node_id)}</strong><small>${escapeHtml(blueprintLinkKind(link))}</small></span><button type="button" data-remove-blueprint-link="${escapeHtml(link.id)}">Remove</button></div>`).join("")}</div></aside>
     </div>
   </section>`;
+}
+
+function blueprintLinkKind(link) {
+  if (link.kind?.kind === "data") return `Data · ${label(link.kind.socket)}`;
+  if (link.kind?.kind === "flow") return `Flow · ${label(link.kind.signal)}`;
+  return "Connection";
 }
 
 function renderBlueprintCanvas(blueprint) {
@@ -565,8 +609,19 @@ root.addEventListener("click", async (event) => {
     ui.preview = null;
     render();
   } else if (target.dataset.action === "start-candidate") {
-    const result = await run(() => board.startAgentLoop({ workItemId: target.dataset.workItem }));
-    if (result) await reload();
+    const workItemId = target.dataset.workItem;
+    const result = await run(() => runAgentLoopWithFeedback({
+      workItemId,
+      update: updateActiveAgentLoop,
+      waitForPaint: waitForVisiblePaint,
+      start: (request) => board.startAgentLoop(request),
+      reload,
+    }));
+    if (result) {
+      ui.preview = null;
+      ui.page = "activity";
+      render();
+    }
   } else if (target.dataset.action === "toggle-work-form") {
     document.querySelector("#work-form")?.classList.toggle("collapsed");
   } else if (target.dataset.action === "toggle-agent-form") {

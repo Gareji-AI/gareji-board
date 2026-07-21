@@ -204,6 +204,39 @@ impl SqliteBoardStore {
         Ok(true)
     }
 
+    /// Replace the bundled portfolio names with explicit disposable-demo labels.
+    ///
+    /// This is intentionally separate from seeding so normal first-run Board
+    /// workspaces retain their product names. Only the isolated demo launcher
+    /// should call it.
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage error when a bundled demo project is missing or the
+    /// update transaction cannot complete.
+    pub fn apply_demo_project_labels(&mut self) -> Result<(), StoreError> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(StoreError::Sqlite)?;
+        for (project_id, name) in [
+            ("gareji-board", "Gareji Board · Sample"),
+            ("gareji-core", "Gareji Core · Sample"),
+            ("zettelkasten-plugin", "Sample Knowledge Plugin"),
+        ] {
+            let changed = transaction
+                .execute(
+                    "UPDATE board_projects SET name = ?2 WHERE id = ?1",
+                    params![project_id, name],
+                )
+                .map_err(StoreError::Sqlite)?;
+            if changed != 1 {
+                return Err(StoreError::CorruptState("demo project is missing"));
+            }
+        }
+        transaction.commit().map_err(StoreError::Sqlite)
+    }
+
     /// Load the complete initial portfolio read model in one query.
     ///
     /// # Errors
@@ -5471,6 +5504,40 @@ mod tests {
             candidate.required_capabilities,
             vec!["implementation".to_owned()]
         );
+    }
+
+    #[test]
+    fn disposable_demo_labels_are_explicit_idempotent_and_keep_stable_ids() {
+        let mut store = SqliteBoardStore::open_in_memory().unwrap();
+        store.seed_sample_if_empty().unwrap();
+
+        let before = store.load_portfolio().unwrap();
+        assert_eq!(
+            before
+                .projects
+                .iter()
+                .find(|project| project.id == "gareji-core")
+                .unwrap()
+                .name,
+            "Gareji Core"
+        );
+
+        store.apply_demo_project_labels().unwrap();
+        store.apply_demo_project_labels().unwrap();
+
+        let after = store.load_portfolio().unwrap();
+        for (project_id, expected_name) in [
+            ("gareji-board", "Gareji Board · Sample"),
+            ("gareji-core", "Gareji Core · Sample"),
+            ("zettelkasten-plugin", "Sample Knowledge Plugin"),
+        ] {
+            let project = after
+                .projects
+                .iter()
+                .find(|project| project.id == project_id)
+                .unwrap();
+            assert_eq!(project.name, expected_name);
+        }
     }
 
     #[test]

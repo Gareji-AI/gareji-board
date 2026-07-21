@@ -1,4 +1,5 @@
 use std::env;
+use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -42,6 +43,7 @@ pub struct DesktopSnapshot {
     pub activity: Vec<ActivityView>,
     pub metrics: MetricsView,
     pub storage_label: String,
+    pub demo_workspace: bool,
     pub warning: Option<String>,
 }
 
@@ -309,6 +311,7 @@ impl BoardModule {
             activity: activity.activities.iter().map(ActivityView::from).collect(),
             metrics,
             storage_label: database_path.display().to_string(),
+            demo_workspace: is_demo_workspace(),
             warning: join_warnings([approach_warning, core_warning, hydration_warning]),
         })
     }
@@ -750,6 +753,14 @@ fn board_database_path() -> PathBuf {
         .map_or_else(default_board_database_path, PathBuf::from)
 }
 
+fn is_demo_workspace() -> bool {
+    demo_workspace_from_marker(env::var_os("GAREJI_DEMO_EXECUTION_WORKSPACE"))
+}
+
+fn demo_workspace_from_marker(marker: Option<OsString>) -> bool {
+    marker.is_some_and(|value| !value.is_empty())
+}
+
 fn canonical_workspace(value: &str) -> Result<PathBuf, String> {
     let path = Path::new(value.trim());
     if value.trim().is_empty() || !path.is_dir() {
@@ -884,6 +895,13 @@ fn display_error(error: impl std::fmt::Display) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn demo_workspace_marker_requires_a_non_empty_value() {
+        assert!(!demo_workspace_from_marker(None));
+        assert!(!demo_workspace_from_marker(Some(OsString::new())));
+        assert!(demo_workspace_from_marker(Some(OsString::from("demo"))));
+    }
 
     #[test]
     fn desktop_state_parser_accepts_only_the_canonical_vocabulary() {

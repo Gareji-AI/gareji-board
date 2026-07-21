@@ -30,6 +30,7 @@ anyhow = "1.0.100"
 chrono = { version = "0.4.44", default-features = false, features = ["std"] }
 clap = { version = "4.6.0", features = ["derive", "env"] }
 directories = "6.0.0"
+include_dir = "0.7.4"
 gareji-board-domain = { path = "crates/gareji-board-domain" }
 gareji-board-runner = { path = "crates/gareji-board-runner" }
 gareji-board-bridge = { path = "crates/gareji-board-bridge" }
