@@ -1072,6 +1072,7 @@ fn create_private_output(path: &Path) -> io::Result<File> {
 mod tests {
     use std::cell::RefCell;
     use std::rc::Rc;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::*;
@@ -1238,12 +1239,14 @@ mod tests {
 
     impl Fixture {
         fn new() -> Self {
+            static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(0);
+            let fixture_id = NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed);
             let nonce = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
                 .as_nanos();
             let root = env::temp_dir().join(format!(
-                "gareji-board-runner-{}-{nonce}",
+                "gareji-board-runner-{}-{nonce}-{fixture_id}",
                 std::process::id()
             ));
             let workspace = root.join("repository/project");
