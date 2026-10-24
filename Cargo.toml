@@ -36,12 +36,12 @@ gareji-board-runner = { path = "crates/gareji-board-runner" }
 gareji-board-bridge = { path = "crates/gareji-board-bridge" }
 gareji-board-core = { path = "crates/gareji-board-core" }
 gareji-board-store = { path = "crates/gareji-board-store" }
-jsonschema = { version = "0.48.0", default-features = false }
+jsonschema = { version = "0.59.0", default-features = false }
 regex = "1.13.1"
 rusqlite = { version = "0.40.1", features = ["bundled"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
-sha2 = "0.10.9"
+sha2 = "0.11.1"
 thiserror = "2.0.18"
 tokio = { version = "1.53.0", features = ["rt", "time"] }
 walkdir = "2.5.0"
